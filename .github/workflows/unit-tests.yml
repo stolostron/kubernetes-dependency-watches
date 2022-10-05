@@ -1,0 +1,50 @@
+name: Unit Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    name: Unit Tests
+    steps:
+    - name: Checkout the repo
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0 # Fetch all history for all tags and branches
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      id: go
+      with:
+        go-version-file: go.mod
+
+    - name: Test Coverage and Report Generation
+      run: |
+        make test-coverage | tee report_unit.json
+        make gosec-scan
+        cat gosec.json
+
+    - name: Store the GitHub triggering event for the sonarcloud workflow
+      if: |
+        github.repository_owner == 'stolostron'
+      run: |
+        cat <<EOF > event.json
+        ${{ toJSON(github.event) }}
+        EOF
+
+    - name: Upload artifacts for the sonarcloud workflow
+      if: |
+        github.repository_owner == 'stolostron'
+      uses: actions/upload-artifact@v3
+      with:
+        name: artifacts
+        path: |
+          coverage*.out
+          event.json
+          gosec.json
