@@ -1,5 +1,7 @@
 // Copyright Contributors to the Open Cluster Management project
 
+// Package client is an event-driven Go library used when Kubernetes objects need to track when other objects change.
+// The API is heavily based on the popular sigs.k8s.io/controller-runtime library.
 package client
 
 import (
