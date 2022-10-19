@@ -40,14 +40,14 @@ type reconciler struct {
 
 // Reconcile just sends the input watcher to the r.ResultsChan channel so that tests can read the results
 // to see if the appropriate number of reconciles were called.
-func (r *reconciler) Reconcile(ctxTest context.Context, watcher ObjectIdentifier) (reconcile.Result, error) {
+func (r *reconciler) Reconcile(ctx context.Context, watcher ObjectIdentifier) (reconcile.Result, error) {
 	r.ResultsChan <- watcher
 
 	return reconcile.Result{}, nil
 }
 
-func getDynamicWatcher(ctx context.Context) (
-	watcher *corev1.ConfigMap, watched []*corev1.Secret, reconcilerObj *reconciler, dynamicWatcher DynamicWatcher,
+func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
+	watcher *corev1.ConfigMap, watched []*corev1.Secret, dynamicWatcher DynamicWatcher,
 ) {
 	watcher = &corev1.ConfigMap{
 		// This verbose definition is required for the GVK to be present on the object.
@@ -84,10 +84,6 @@ func getDynamicWatcher(ctx context.Context) (
 		watched = append(watched, obj)
 	}
 
-	reconcilerObj = &reconciler{
-		ResultsChan: make(chan ObjectIdentifier, 20),
-	}
-
 	dynamicWatcher, err = New(k8sConfig, reconcilerObj, nil)
 	Expect(err).To(BeNil())
 	Expect(dynamicWatcher).NotTo(BeNil())
@@ -109,7 +105,10 @@ var _ = Describe("Test the client", Ordered, func() {
 
 	BeforeAll(func() {
 		ctxTest, cancelCtxTest = context.WithCancel(ctx)
-		watcher, watched, reconcilerObj, dynamicWatcher = getDynamicWatcher(ctx)
+		reconcilerObj = &reconciler{
+			ResultsChan: make(chan ObjectIdentifier, 20),
+		}
+		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconcilerObj)
 
 		watchedObjIDs = []ObjectIdentifier{}
 		for _, watchedObj := range watched {
@@ -273,7 +272,10 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 
 	BeforeAll(func() {
 		ctxTest, cancelCtxTest = context.WithCancel(ctx)
-		watcher, watched, _, dynamicWatcher = getDynamicWatcher(ctx)
+		reconcilerObj := &reconciler{
+			ResultsChan: make(chan ObjectIdentifier, 20),
+		}
+		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconcilerObj)
 
 		go func() {
 			defer GinkgoRecover()
