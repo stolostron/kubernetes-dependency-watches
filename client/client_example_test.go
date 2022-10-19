@@ -15,7 +15,7 @@ import (
 
 type reconciler struct{}
 
-func (r *reconciler) Reconcile(ctxTest context.Context, watcher client.ObjectIdentifier) (reconcile.Result, error) {
+func (r *reconciler) Reconcile(ctx context.Context, watcher client.ObjectIdentifier) (reconcile.Result, error) {
 	fmt.Printf("An object that this object (%s) was watching was updated\n", watcher)
 
 	return reconcile.Result{}, nil
@@ -93,6 +93,9 @@ func ExampleDynamicWatcher() {
 	if err != nil {
 		panic(err)
 	}
+
+	// Run until the context is canceled.
+	<-ctx.Done()
 
 	// Output:
 }
