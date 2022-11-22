@@ -258,7 +258,7 @@ func (d *dynamicWatcher) reconcileHandler(ctx context.Context, obj interface{}) 
 	switch {
 	case err != nil:
 		d.Queue.AddRateLimited(watcher)
-		klog.Error(err, "Reconciler error")
+		klog.Errorf("Reconciler error: %v", err)
 	case result.RequeueAfter > 0:
 		// The result.RequeueAfter request will be lost, if it is returned
 		// along with a non-nil error. But this is intended as
@@ -284,7 +284,7 @@ func (d *dynamicWatcher) refreshRESTMapper() error {
 
 	apiGroups, err := restmapper.GetAPIGroupResources(discovery)
 	if err != nil {
-		klog.Error(err, "Could not get the API groups list from the Kubernetes API")
+		klog.Errorf("Could not get the API groups list from the Kubernetes API, error: %v", err)
 
 		return err
 	}
@@ -351,7 +351,7 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 			// Refresh the REST mapper and try again if the mapping wasn't found.
 			err = d.refreshRESTMapper()
 			if err != nil {
-				klog.Error(err, "failed to refresh the API discovery data")
+				klog.Errorf("Failed to refresh the API discovery data, error: %v", err)
 
 				encounteredErr = err
 
@@ -360,7 +360,7 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 
 			mapping, err = d.restMapper.RESTMapping(gk, watchedObject.Version)
 			if err != nil {
-				klog.Error(err, "Could not get resource mapping for %s", watchedObject)
+				klog.Errorf("Could not get resource mapping for %s, error: %v", watchedObject, err)
 
 				encounteredErr = err
 
@@ -377,7 +377,7 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 			context.TODO(), metav1.ListOptions{FieldSelector: "metadata.name=" + watchedObject.Name},
 		)
 		if err != nil {
-			klog.Error(err, "Could not start a watch request for %s", watchedObject)
+			klog.Errorf("Could not start a watch request for %s, error: %v", watchedObject, err)
 
 			encounteredErr = err
 
