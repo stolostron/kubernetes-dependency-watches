@@ -46,7 +46,7 @@ func ExampleDynamicWatcher() {
 	defer func() {
 		err := testEnv.Stop()
 		if err != nil {
-			klog.Error(err, "failed to stop the test Kubernetes API")
+			klog.Errorf("failed to stop the test Kubernetes API, error: %v", err)
 		}
 	}()
 
@@ -125,7 +125,7 @@ func ExampleNewControllerRuntimeSource() {
 	defer func() {
 		err := testEnv.Stop()
 		if err != nil {
-			klog.Error(err, "failed to stop the test Kubernetes API")
+			klog.Errorf("failed to stop the test Kubernetes API, error: %v", err)
 		}
 	}()
 
