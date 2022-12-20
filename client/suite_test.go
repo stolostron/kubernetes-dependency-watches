@@ -5,6 +5,7 @@ package client
 import (
 	"context"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -36,12 +37,16 @@ var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
 	By("bootstrapping the test environment")
-	testEnv = &envtest.Environment{}
+	testEnv = &envtest.Environment{ControlPlaneStopTimeout: time.Minute * 3}
 
 	var err error
 	k8sConfig, err = testEnv.Start()
 	Expect(err).To(BeNil())
 	Expect(k8sConfig).NotTo(BeNil())
+
+	// Required for tests that involve restarting the test environment since new certs are generated.
+	k8sConfig.TLSClientConfig.Insecure = true
+	k8sConfig.TLSClientConfig.CAData = nil
 
 	k8sClient, err = kubernetes.NewForConfig(k8sConfig)
 	Expect(err).To(BeNil())

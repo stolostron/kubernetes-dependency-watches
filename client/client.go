@@ -13,11 +13,13 @@ import (
 	apimachinerymeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/watch"
+	apiWatch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/watch"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/ratelimiter"
@@ -31,7 +33,8 @@ var (
 
 type Reconciler interface {
 	// Reconcile is called whenever an object has started being watched (if it exists) as well as when it has changed
-	// (added, modified, or deleted). If an error is returned, the request is requeued.
+	// (added, modified, or deleted). If the watch stops prematurely and is restarted, it may cause a duplicate call to
+	// this method. If an error is returned, the request is requeued.
 	Reconcile(ctx context.Context, watcher ObjectIdentifier) (reconcile.Result, error)
 }
 
@@ -121,7 +124,7 @@ func New(config *rest.Config, reconciler Reconciler, options *Options) (DynamicW
 		startedChan:       make(chan struct{}),
 		watchedToWatchers: map[ObjectIdentifier]map[ObjectIdentifier]bool{},
 		watcherToWatches:  map[ObjectIdentifier]map[ObjectIdentifier]bool{},
-		watches:           map[ObjectIdentifier]watch.Interface{},
+		watches:           map[ObjectIdentifier]apiWatch.Interface{},
 	}
 
 	return &watcher, nil
@@ -151,7 +154,7 @@ type dynamicWatcher struct {
 	watcherToWatches map[ObjectIdentifier]map[ObjectIdentifier]bool
 	// watches is a map where the keys are ObjectIdentifier objects representing the watched objects and the values
 	// are objects representing the Kubernetes watch API requests.
-	watches map[ObjectIdentifier]watch.Interface
+	watches map[ObjectIdentifier]apiWatch.Interface
 }
 
 // Start will start the dynamicWatcher and block until the input context is canceled.
@@ -189,7 +192,7 @@ func (d *dynamicWatcher) Start(ctx context.Context) error {
 
 	d.watchedToWatchers = map[ObjectIdentifier]map[ObjectIdentifier]bool{}
 	d.watcherToWatches = map[ObjectIdentifier]map[ObjectIdentifier]bool{}
-	d.watches = map[ObjectIdentifier]watch.Interface{}
+	d.watches = map[ObjectIdentifier]apiWatch.Interface{}
 	d.startedChan = make(chan struct{})
 	d.started = false
 
@@ -204,24 +207,80 @@ func (d *dynamicWatcher) Started() <-chan struct{} {
 }
 
 // relayWatchEvents will watch a channel tied to a Kubernetes API watch and then relay changes to the dynamicWatcher
-// queue.
-func (d *dynamicWatcher) relayWatchEvents(watchedObject ObjectIdentifier, events <-chan watch.Event) {
-	for event := range events {
-		// A watch error is usually from the watch request being explicitly stopped. This is why it's considered a
-		// debug log.
-		if event.Type == watch.Error {
-			klog.V(2).Infof("An error was received from the watch request: %v", event.Object)
+// queue. If the watch stops unintentionally after retries from the client-go RetryWatcher, it will be restarted at the
+// latest resourceVersion. This usually happens if the retry watcher tries to start watching again at a resource version
+// that is no longer in etcd.
+func (d *dynamicWatcher) relayWatchEvents(
+	watchedObject ObjectIdentifier,
+	resource dynamic.ResourceInterface,
+	watchedObjectExists bool,
+	events <-chan apiWatch.Event,
+) {
+	sendInitialEvent := watchedObjectExists
+
+	for {
+		// Send an initial event when the watch is started and the object exists to replicate the list and watch
+		// behavior of controller-runtime. A watch restart can also trigger this to account for a lost event.
+		if sendInitialEvent {
+			d.lock.RLock()
+
+			for watcher := range d.watchedToWatchers[watchedObject] {
+				d.Queue.Add(watcher)
+			}
+
+			d.lock.RUnlock()
+
+			sendInitialEvent = false
+		}
+
+		// This for loop exits when the events channel closes, thus signaling that the RetryWatch stopped.
+		for event := range events {
+			// A watch error is usually from the watch request being explicitly stopped. This is why it's considered a
+			// debug log.
+			if event.Type == apiWatch.Error {
+				klog.V(2).Infof("An error was received from the watch request: %v", event.Object)
+
+				continue
+			}
+
+			d.lock.RLock()
+
+			for watcher := range d.watchedToWatchers[watchedObject] {
+				d.Queue.Add(watcher)
+			}
+
+			d.lock.RUnlock()
+		}
+
+		// The RetryWatch stopped, so figure out if this was intentional or due to an error.
+		d.lock.Lock()
+
+		// If the dynamicWatcher is unaware of the watch, then that means the watch stopping is intentional and the
+		// relay can end.
+		if _, ok := d.watches[watchedObject]; !ok {
+			klog.V(2).Infof("A watch channel for the watcher %s was closed", watchedObject)
+			d.lock.Unlock()
+
+			return
+		}
+
+		klog.V(1).Infof("Restarting the watch request for %s", watchedObject)
+
+		w, _, err := watchLatest(watchedObject, resource)
+		if err != nil {
+			klog.Errorf("Could not restart a watch request for %s. Trying again. Error: %v", watchedObject, err)
+			d.lock.Unlock()
 
 			continue
 		}
 
-		d.lock.RLock()
+		d.watches[watchedObject] = w
+		d.lock.Unlock()
 
-		for watcher := range d.watchedToWatchers[watchedObject] {
-			d.Queue.Add(watcher)
-		}
-
-		d.lock.RUnlock()
+		// Use the new watch channel which will be used in the next iteration of the loop.
+		events = w.ResultChan()
+		// Send the initial event in case an action was lost between watch requests.
+		sendInitialEvent = true
 	}
 }
 
@@ -373,9 +432,7 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 			resource = resource.(dynamic.NamespaceableResourceInterface).Namespace(watchedObject.Namespace)
 		}
 
-		watch, err := resource.Watch(
-			context.TODO(), metav1.ListOptions{FieldSelector: "metadata.name=" + watchedObject.Name},
-		)
+		w, exists, err := watchLatest(watchedObject, resource)
 		if err != nil {
 			klog.Errorf("Could not start a watch request for %s, error: %v", watchedObject, err)
 
@@ -384,14 +441,14 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 			break
 		}
 
-		d.watches[watchedObject] = watch
+		d.watches[watchedObject] = w
 		d.watchedToWatchers[watchedObject][watcher] = true
 		watchedObjectsSet[watchedObject] = true
 
 		watchesAdded = append(watchesAdded, watchedObject)
 
 		// Launch a Go routine per watch API request that will feed d.Queue.
-		go d.relayWatchEvents(watchedObject, watch.ResultChan())
+		go d.relayWatchEvents(watchedObject, resource, exists, w.ResultChan())
 	}
 
 	// If an error was encountered, remove the watches that were added to revert back to the previous state.
@@ -416,6 +473,33 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 	return nil
 }
 
+// watchLatest performs a list with the field selector for the input watched object to get the resource version and then
+// starts the watch using the client-go RetryWatcher API. The returned bool indicates that the input watched object
+// exists on the cluster.
+func watchLatest(watchedObject ObjectIdentifier, resource dynamic.ResourceInterface) (apiWatch.Interface, bool, error) {
+	fieldSelector := "metadata.name=" + watchedObject.Name
+	timeout := int64(10)
+
+	listResult, err := resource.List(
+		context.TODO(), metav1.ListOptions{FieldSelector: fieldSelector, TimeoutSeconds: &timeout},
+	)
+	if err != nil {
+		return nil, false, err
+	}
+
+	resourceVersion := listResult.GetResourceVersion()
+
+	watchFunc := func(options metav1.ListOptions) (apiWatch.Interface, error) {
+		options.FieldSelector = fieldSelector
+
+		return resource.Watch(context.Background(), options)
+	}
+
+	w, err := watch.NewRetryWatcher(resourceVersion, &cache.ListWatch{WatchFunc: watchFunc})
+
+	return w, len(listResult.Items) != 0, err
+}
+
 // removeWatch will remove a reference to the input watched object. If the references on the watched object become 0,
 // the watch API request is stopped. Note that it's expected that the lock is already acquired by the caller.
 func (d *dynamicWatcher) removeWatch(watcher ObjectIdentifier, watchedObject ObjectIdentifier) {
@@ -424,7 +508,10 @@ func (d *dynamicWatcher) removeWatch(watcher ObjectIdentifier, watchedObject Obj
 
 	// Stop the watch API request if the watcher was the only one watching this object.
 	if len(d.watchedToWatchers[watchedObject]) == 0 {
-		d.watches[watchedObject].Stop()
+		// Defer this so that the map is cleared before the watch is stopped to signal to relayWatchEvents that this
+		// is an intentional stop.
+		defer d.watches[watchedObject].Stop()
+
 		delete(d.watches, watchedObject)
 		delete(d.watchedToWatchers, watchedObject)
 	}
