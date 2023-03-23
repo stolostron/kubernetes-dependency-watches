@@ -9,15 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
-	apimachinerymeta "k8s.io/apimachinery/pkg/api/meta"
+	"github.com/jellydator/ttlcache/v3"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiWatch "k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/watch"
 	"k8s.io/client-go/util/workqueue"
@@ -27,8 +28,9 @@ import (
 )
 
 var (
-	ErrNotStarted   error = errors.New("DynamicWatcher must be started to perform this action")
-	ErrInvalidInput error = errors.New("invalid input provided")
+	ErrNotStarted          error = errors.New("DynamicWatcher must be started to perform this action")
+	ErrInvalidInput        error = errors.New("invalid input provided")
+	ErrNoVersionedResource error = errors.New("the resource version was not found")
 )
 
 type Reconciler interface {
@@ -116,9 +118,16 @@ func New(config *rest.Config, reconciler Reconciler, options *Options) (DynamicW
 		return nil, fmt.Errorf("failed to initialize a dynamic Kubernetes client: %w", err)
 	}
 
+	gvkToGVRCache := ttlcache.New(
+		ttlcache.WithTTL[schema.GroupVersionKind, schema.GroupVersionResource](10 * time.Minute),
+	)
+	// This will periodically delete expired cache items.
+	go gvkToGVRCache.Start()
+
 	watcher := dynamicWatcher{
 		client:            client,
 		dynamicClient:     dynamicClient,
+		gvkToGVR:          gvkToGVRCache,
 		rateLimiter:       rateLimiter,
 		Reconciler:        reconciler,
 		startedChan:       make(chan struct{}),
@@ -140,8 +149,9 @@ type dynamicWatcher struct {
 	Queue  workqueue.RateLimitingInterface
 	Reconciler
 	rateLimiter ratelimiter.RateLimiter
-	// restMapper is used to map ObjectIdentifer objects to an API resource.
-	restMapper apimachinerymeta.RESTMapper
+	// gvkToGVR is used as a cache of GVK to GVR mappings. The cache entries automatically expire every 10 minutes when
+	// using the New function.
+	gvkToGVR *ttlcache.Cache[schema.GroupVersionKind, schema.GroupVersionResource]
 	// started gets set as part of the Start method.
 	started bool
 	// startedChan is closed when the dynamicWatcher is started. This is exposed to the user through the Started method.
@@ -162,11 +172,6 @@ func (d *dynamicWatcher) Start(ctx context.Context) error {
 	klog.Info("Starting the dynamic watcher")
 
 	d.Queue = workqueue.NewRateLimitingQueue(d.rateLimiter)
-
-	err := d.refreshRESTMapper()
-	if err != nil {
-		return fmt.Errorf("failed to the Kubernetes API REST mapper: %w", err)
-	}
 
 	go func() {
 		<-ctx.Done()
@@ -334,25 +339,6 @@ func (d *dynamicWatcher) reconcileHandler(ctx context.Context, obj interface{}) 
 	}
 }
 
-// refreshRESTMapper will call the discovery API and create a RESTMapper that is used to convert a GVK to a GVR. An
-// error is returned if the discovery API call failed.
-func (d *dynamicWatcher) refreshRESTMapper() error {
-	klog.V(2).Info("Refreshing the Kubernetes API REST Mapper")
-
-	discovery := d.client.Discovery()
-
-	apiGroups, err := restmapper.GetAPIGroupResources(discovery)
-	if err != nil {
-		klog.Errorf("Could not get the API groups list from the Kubernetes API, error: %v", err)
-
-		return err
-	}
-
-	d.restMapper = restmapper.NewDiscoveryRESTMapper(apiGroups)
-
-	return nil
-}
-
 // AddOrUpdateWatcher updates the watches for the watcher. When updating, any previously watched objects not specified
 // will stop being watched. If an error occurs, any created watches as part of this method execution will be removed.
 func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObjects ...ObjectIdentifier) error {
@@ -403,31 +389,16 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 			continue
 		}
 
-		gk := schema.GroupKind{Group: watchedObject.Group, Kind: watchedObject.Kind}
-
-		mapping, err := d.restMapper.RESTMapping(gk, watchedObject.Version)
+		gvr, err := d.gvrFromObjectIdentifier(watchedObject)
 		if err != nil {
-			// Refresh the REST mapper and try again if the mapping wasn't found.
-			err = d.refreshRESTMapper()
-			if err != nil {
-				klog.Errorf("Failed to refresh the API discovery data, error: %v", err)
+			klog.Errorf("Could not get the GVR for %s, error: %v", watchedObject, err)
 
-				encounteredErr = err
+			encounteredErr = err
 
-				break
-			}
-
-			mapping, err = d.restMapper.RESTMapping(gk, watchedObject.Version)
-			if err != nil {
-				klog.Errorf("Could not get resource mapping for %s, error: %v", watchedObject, err)
-
-				encounteredErr = err
-
-				break
-			}
+			break
 		}
 
-		var resource dynamic.ResourceInterface = d.dynamicClient.Resource(mapping.Resource)
+		var resource dynamic.ResourceInterface = d.dynamicClient.Resource(gvr)
 		if watchedObject.Namespace != "" {
 			resource = resource.(dynamic.NamespaceableResourceInterface).Namespace(watchedObject.Namespace)
 		}
@@ -548,4 +519,50 @@ func (d *dynamicWatcher) GetWatchCount() uint {
 	d.lock.RUnlock()
 
 	return count
+}
+
+// gvrFromObjectIdentifier uses the discovery client to get the versioned resource. If the resource is not found or
+// could not be retrieved, an error is always returned.
+func (d *dynamicWatcher) gvrFromObjectIdentifier(watchedObject ObjectIdentifier) (schema.GroupVersionResource, error) {
+	gvk := schema.GroupVersionKind{
+		Group: watchedObject.Group, Version: watchedObject.Version, Kind: watchedObject.Kind,
+	}
+
+	// First check the cache
+	if cachedGVR := d.gvkToGVR.Get(gvk); cachedGVR != nil {
+		// Delete the cached item if it's expired
+		if cachedGVR.IsExpired() {
+			d.gvkToGVR.Delete(gvk)
+		} else {
+			return cachedGVR.Value(), nil
+		}
+	}
+
+	rsrcList, err := d.client.Discovery().ServerResourcesForGroupVersion(gvk.GroupVersion().String())
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return schema.GroupVersionResource{}, fmt.Errorf("%w: %s", ErrNoVersionedResource, gvk.String())
+		}
+
+		return schema.GroupVersionResource{}, err
+	}
+
+	for _, rsrc := range rsrcList.APIResources {
+		if rsrc.Kind == gvk.Kind {
+			gvr := schema.GroupVersionResource{
+				Group:    gvk.Group,
+				Version:  gvk.Version,
+				Resource: rsrc.Name,
+			}
+
+			// Cache the value
+			d.gvkToGVR.Set(gvk, gvr, ttlcache.DefaultTTL)
+
+			return gvr, nil
+		}
+	}
+
+	return schema.GroupVersionResource{}, fmt.Errorf(
+		"%w: no matching kind was found: %s", ErrNoVersionedResource, gvk.String(),
+	)
 }
