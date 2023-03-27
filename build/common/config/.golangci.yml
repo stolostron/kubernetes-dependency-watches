@@ -29,6 +29,10 @@ linters:
   enable-all: true
   disable:
     - bodyclose
+    # Fails due to  Can't run linter goanalysis_metalinter: goanalysis_metalinter:
+    # contextcheck: package \"client\" (isInitialPkg: true, needAnalyzeSource: true): runtime error: invalid memory
+    # address or nil pointer dereference
+    - contextcheck
     - cyclop
     - depguard
     - dupl
