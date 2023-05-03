@@ -40,7 +40,7 @@ type reconciler struct {
 
 // Reconcile just sends the input watcher to the r.ResultsChan channel so that tests can read the results
 // to see if the appropriate number of reconciles were called.
-func (r *reconciler) Reconcile(ctx context.Context, watcher ObjectIdentifier) (reconcile.Result, error) {
+func (r *reconciler) Reconcile(_ context.Context, watcher ObjectIdentifier) (reconcile.Result, error) {
 	r.ResultsChan <- watcher
 
 	return reconcile.Result{}, nil
@@ -63,7 +63,7 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
 
 	var err error
 	_, err = k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, watcher, metav1.CreateOptions{})
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 
 	for _, name := range []string{"watched1", "watched2"} {
 		obj := &corev1.Secret{
@@ -79,13 +79,13 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
 		}
 
 		_, err = k8sClient.CoreV1().Secrets(namespace).Create(ctx, obj, metav1.CreateOptions{})
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		watched = append(watched, obj)
 	}
 
 	dynamicWatcher, err = New(k8sConfig, reconcilerObj, nil)
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 	Expect(dynamicWatcher).NotTo(BeNil())
 
 	// Return the named return values.
@@ -119,7 +119,7 @@ var _ = Describe("Test the client", Ordered, func() {
 			defer GinkgoRecover()
 
 			err := dynamicWatcher.Start(ctxTest)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		}()
 
 		<-dynamicWatcher.Started()
@@ -137,13 +137,13 @@ var _ = Describe("Test the client", Ordered, func() {
 		for _, objectID := range watched {
 			err := k8sClient.CoreV1().Secrets(namespace).Delete(ctxTest, objectID.Name, metav1.DeleteOptions{})
 			if !k8serrors.IsNotFound(err) {
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 			}
 		}
 
 		err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctxTest, watcher.Name, metav1.DeleteOptions{})
 		if !k8serrors.IsNotFound(err) {
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		}
 
 		cancelCtxTest()
@@ -171,7 +171,7 @@ var _ = Describe("Test the client", Ordered, func() {
 			Name:      "watcher",
 		}
 		err = dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs[0], obj)
-		Expect(err).ToNot(BeNil())
+		Expect(err).To(HaveOccurred())
 
 		By("Verifying that the previous encountered error resulted in the watch being cleaned up")
 		Eventually(dynamicWatcher.GetWatchCount, "3s").Should(Equal(uint(0)))
@@ -180,14 +180,14 @@ var _ = Describe("Test the client", Ordered, func() {
 	It("Adds watches", func() {
 		By("Adding the watcher with a single watched object")
 		err := dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs[0])
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		By("Checking that the reconciler was called during the initial list")
 		Eventually(reconcilerObj.ResultsChan, "5s").Should(HaveLen(1))
 
 		By("Update the watcher with both watched objects")
 		err = dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs...)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		By("Checking that the reconciler was called during the initial list")
 		Eventually(reconcilerObj.ResultsChan, "5s").Should(HaveLen(2))
@@ -205,15 +205,15 @@ var _ = Describe("Test the client", Ordered, func() {
 		By("Updating a watched object")
 		watched[0].Labels = map[string]string{"watch": "me"}
 		_, err := k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watched[0], metav1.UpdateOptions{})
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		Eventually(reconcilerObj.ResultsChan, "5s").Should(HaveLen(1))
 	})
 
 	It("Ensures the watches restart on a Kubernetes API outage", func() {
 		By("Restarting the Kubernetes API server")
-		Expect(testEnv.ControlPlane.APIServer.Stop()).To(BeNil())
-		Expect(testEnv.ControlPlane.APIServer.Start()).To(BeNil())
+		Expect(testEnv.ControlPlane.APIServer.Stop()).To(Succeed())
+		Expect(testEnv.ControlPlane.APIServer.Start()).To(Succeed())
 
 		By("Checking that a reconcile for each object was called")
 		// This is a longer timeout to account for the API server needing to start up.
@@ -227,7 +227,7 @@ var _ = Describe("Test the client", Ordered, func() {
 	It("Ensures no duplicate watches are added", func() {
 		By("Making a watched object be watched by another watcher")
 		err := dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watched[0]), toObjectIdentifer(watched[1]))
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		By("Checking the watch count")
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
@@ -240,32 +240,32 @@ var _ = Describe("Test the client", Ordered, func() {
 
 		By("Removing the second watcher")
 		err = dynamicWatcher.RemoveWatcher(toObjectIdentifer(watched[0]))
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		By("Checking that the watch wasn't garbage collected")
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
 
 		By("Updating the first watcher to watch only one object")
 		err = dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), toObjectIdentifer(watched[0]))
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		By("Checking that a watch was garbage collected")
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(1)))
 
 		By("Removing the first watcher entirely")
 		err = dynamicWatcher.RemoveWatcher(toObjectIdentifer(watcher))
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		By("Checking that the remaining watch is garbage collected")
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(0)))
 
 		By("Checking that no reconcile happened from removing the watches")
-		Expect(reconcilerObj.ResultsChan).Should(HaveLen(0))
+		Expect(reconcilerObj.ResultsChan).Should(BeEmpty())
 
 		By("Updating a previously watched object to ensure no reconcile is called")
 		watched[0].Labels = map[string]string{"watch": "me-too"}
 		_, err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watched[0], metav1.UpdateOptions{})
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		Consistently(reconcilerObj.ResultsChan, "3s").Should(HaveLen(0))
 	})
@@ -291,7 +291,7 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 			defer GinkgoRecover()
 
 			err := dynamicWatcher.Start(ctxTest)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		}()
 
 		<-dynamicWatcher.Started()
@@ -302,13 +302,13 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 			// Use the parent context since ctxTest is closed during the test.
 			err := k8sClient.CoreV1().Secrets(namespace).Delete(ctx, objectID.Name, metav1.DeleteOptions{})
 			if !k8serrors.IsNotFound(err) {
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 			}
 		}
 
 		err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, watcher.Name, metav1.DeleteOptions{})
 		if !k8serrors.IsNotFound(err) {
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		}
 	})
 
@@ -320,7 +320,7 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 
 		By("Adding the watcher with two watched objects")
 		err := dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs...)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		By("Verifying the watch count")
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
@@ -354,7 +354,7 @@ var _ = Describe("Test ObjectIdentifier", func() {
 			Name:      "watcher",
 		}
 		err := obj.Validate()
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		obj.Version = ""
 		err = obj.Validate()
@@ -378,7 +378,7 @@ var reconcileRV func() (reconcile.Result, error)
 
 // Reconcile just sends the input watcher to the r.ResultsChan channel so that tests can read the results
 // to see if the appropriate number of reconciles were called.
-func (r *reconciler2) Reconcile(ctxTest context.Context, watcher ObjectIdentifier) (reconcile.Result, error) {
+func (r *reconciler2) Reconcile(_ context.Context, _ ObjectIdentifier) (reconcile.Result, error) {
 	return reconcileRV()
 }
 
@@ -419,6 +419,7 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 		dynWatcher.Queue.Add(obj)
 
 		go func() {
+			//nolint: revive
 			for dynWatcher.processNextWorkItem(ctx) {
 			}
 		}()
@@ -456,6 +457,7 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 		dynWatcher.Queue.Add(obj)
 
 		go func() {
+			//nolint: revive
 			for dynWatcher.processNextWorkItem(ctx) {
 			}
 		}()
@@ -493,6 +495,7 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 		dynWatcher.Queue.Add(obj)
 
 		go func() {
+			//nolint: revive
 			for dynWatcher.processNextWorkItem(ctx) {
 			}
 		}()
@@ -522,6 +525,7 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 		defer cancel()
 
 		go func() {
+			//nolint: revive
 			for dynWatcher.processNextWorkItem(ctx) {
 			}
 		}()

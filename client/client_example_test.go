@@ -18,8 +18,8 @@ import (
 
 type reconciler struct{}
 
-func (r *reconciler) Reconcile(ctx context.Context, watcher client.ObjectIdentifier) (reconcile.Result, error) {
-	// nolint: forbidigo
+func (r *reconciler) Reconcile(_ context.Context, watcher client.ObjectIdentifier) (reconcile.Result, error) {
+	//nolint: forbidigo
 	fmt.Printf("An object that this object (%s) was watching was updated\n", watcher)
 
 	return reconcile.Result{}, nil
@@ -27,8 +27,8 @@ func (r *reconciler) Reconcile(ctx context.Context, watcher client.ObjectIdentif
 
 type ctrlRuntimeReconciler struct{}
 
-func (r *ctrlRuntimeReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
-	// nolint: forbidigo
+func (r *ctrlRuntimeReconciler) Reconcile(_ context.Context, req reconcile.Request) (reconcile.Result, error) {
+	//nolint: forbidigo
 	fmt.Printf("The following reconcile request was received: %v\n", req)
 
 	return reconcile.Result{}, nil
