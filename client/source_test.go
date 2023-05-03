@@ -20,7 +20,7 @@ type controllerRuntimeReconciler struct {
 	ReconcileCount int
 }
 
-func (r *controllerRuntimeReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+func (r *controllerRuntimeReconciler) Reconcile(_ context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	r.ReconcileCount++
 
 	return reconcile.Result{}, nil
@@ -53,7 +53,7 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 			defer GinkgoRecover()
 
 			err := dynamicWatcher.Start(ctxTest)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		}()
 
 		<-dynamicWatcher.Started()
@@ -66,19 +66,19 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 			LeaderElection:         false,
 		}
 		mgr, err := ctrl.NewManager(k8sConfig, options)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		err = ctrl.NewControllerManagedBy(mgr).
 			For(&corev1.ConfigMap{}).
 			Watches(sourceChan, &handler.EnqueueRequestForObject{}).
 			Complete(&ctrlRuntimeReconciler)
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		go func() {
 			defer GinkgoRecover()
 
 			err := mgr.Start(ctxTest)
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		}()
 
 		// Wait for the list reconcile
@@ -92,13 +92,13 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 		for _, objectID := range watched {
 			err := k8sClient.CoreV1().Secrets(namespace).Delete(ctxTest, objectID.Name, metav1.DeleteOptions{})
 			if !k8serrors.IsNotFound(err) {
-				Expect(err).To(BeNil())
+				Expect(err).ToNot(HaveOccurred())
 			}
 		}
 
 		err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctxTest, watcher.Name, metav1.DeleteOptions{})
 		if !k8serrors.IsNotFound(err) {
-			Expect(err).To(BeNil())
+			Expect(err).ToNot(HaveOccurred())
 		}
 
 		cancelCtxTest()
@@ -107,14 +107,14 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 	It("Verifies that a controller-runtime reconciler can use this library", func() {
 		By("Adding the watcher with a single watched object")
 		err := dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs[0])
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		Eventually(func() int { return ctrlRuntimeReconciler.ReconcileCount }, "5s").Should(Equal(1))
 
 		By("Updating a watched object to trigger a reconcile")
 		watched[0].StringData = map[string]string{"hello": "world"}
 		watched[0], err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watched[0], metav1.UpdateOptions{})
-		Expect(err).To(BeNil())
+		Expect(err).ToNot(HaveOccurred())
 
 		By("Verifying that the controller-runtime reconciler was triggered")
 		Eventually(func() int { return ctrlRuntimeReconciler.ReconcileCount }, "5s").Should(Equal(2))

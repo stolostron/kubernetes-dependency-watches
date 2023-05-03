@@ -37,7 +37,7 @@ type ControllerRuntimeSourceReconciler struct {
 // Reconcile will convert the input ObjectIdentifier and send a controller-runtime GenericEvent on
 // ControllerRuntimeSourceReconciler's eventChan channel.
 func (t *ControllerRuntimeSourceReconciler) Reconcile(
-	ctx context.Context, watcher ObjectIdentifier,
+	_ context.Context, watcher ObjectIdentifier,
 ) (
 	reconcile.Result, error,
 ) {

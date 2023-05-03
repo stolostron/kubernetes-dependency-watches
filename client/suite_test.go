@@ -41,7 +41,7 @@ var _ = BeforeSuite(func() {
 
 	var err error
 	k8sConfig, err = testEnv.Start()
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 	Expect(k8sConfig).NotTo(BeNil())
 
 	// Required for tests that involve restarting the test environment since new certs are generated.
@@ -49,23 +49,23 @@ var _ = BeforeSuite(func() {
 	k8sConfig.TLSClientConfig.CAData = nil
 
 	k8sClient, err = kubernetes.NewForConfig(k8sConfig)
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
 	_, err = k8sClient.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 })
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	err := k8sClient.CoreV1().Namespaces().Delete(ctx, namespace, metav1.DeleteOptions{})
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 
 	cancel()
 
 	err = testEnv.Stop()
-	Expect(err).To(BeNil())
+	Expect(err).ToNot(HaveOccurred())
 })

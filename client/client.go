@@ -28,9 +28,9 @@ import (
 )
 
 var (
-	ErrNotStarted          error = errors.New("DynamicWatcher must be started to perform this action")
-	ErrInvalidInput        error = errors.New("invalid input provided")
-	ErrNoVersionedResource error = errors.New("the resource version was not found")
+	ErrNotStarted          = errors.New("DynamicWatcher must be started to perform this action")
+	ErrInvalidInput        = errors.New("invalid input provided")
+	ErrNoVersionedResource = errors.New("the resource version was not found")
 )
 
 type Reconciler interface {
@@ -184,6 +184,7 @@ func (d *dynamicWatcher) Start(ctx context.Context) error {
 	d.started = true
 	close(d.startedChan)
 
+	//nolint: revive
 	for d.processNextWorkItem(ctx) {
 	}
 
