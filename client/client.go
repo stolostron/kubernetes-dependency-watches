@@ -371,6 +371,19 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 	watchesAdded := []ObjectIdentifier{}
 
 	for _, watchedObject := range watchedObjects {
+		gvr, namespaced, err := d.gvrFromObjectIdentifier(watchedObject)
+		if err != nil {
+			klog.Errorf("Could not get the GVR for %s, error: %v", watchedObject, err)
+
+			encounteredErr = err
+
+			break
+		}
+
+		if !namespaced { // ignore namespaces set on cluster-scoped resources
+			watchedObject.Namespace = ""
+		}
+
 		// If the object was previously watched, do nothing.
 		if d.watcherToWatches[watcher][watchedObject] {
 			watchedObjectsSet[watchedObject] = true
@@ -382,21 +395,12 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 			d.watchedToWatchers[watchedObject] = map[ObjectIdentifier]bool{}
 		}
 
-		// If the object is also watched another object, then do nothing.
+		// If the object is also watched by another object, then do nothing.
 		if _, ok := d.watches[watchedObject]; ok {
 			watchedObjectsSet[watchedObject] = true
 			d.watchedToWatchers[watchedObject][watcher] = true
 
 			continue
-		}
-
-		gvr, err := d.gvrFromObjectIdentifier(watchedObject)
-		if err != nil {
-			klog.Errorf("Could not get the GVR for %s, error: %v", watchedObject, err)
-
-			encounteredErr = err
-
-			break
 		}
 
 		var resource dynamic.ResourceInterface = d.dynamicClient.Resource(gvr)
@@ -522,9 +526,11 @@ func (d *dynamicWatcher) GetWatchCount() uint {
 	return count
 }
 
-// gvrFromObjectIdentifier uses the discovery client to get the versioned resource. If the resource is not found or
-// could not be retrieved, an error is always returned.
-func (d *dynamicWatcher) gvrFromObjectIdentifier(watchedObject ObjectIdentifier) (schema.GroupVersionResource, error) {
+// gvrFromObjectIdentifier uses the discovery client to get the versioned resource and whether it is
+// namespaced. If the resource is not found or could not be retrieved, an error is always returned.
+func (d *dynamicWatcher) gvrFromObjectIdentifier(watchedObject ObjectIdentifier) (
+	schema.GroupVersionResource, bool, error,
+) {
 	gvk := schema.GroupVersionKind{
 		Group: watchedObject.Group, Version: watchedObject.Version, Kind: watchedObject.Kind,
 	}
@@ -535,17 +541,17 @@ func (d *dynamicWatcher) gvrFromObjectIdentifier(watchedObject ObjectIdentifier)
 		if cachedGVR.IsExpired() {
 			d.gvkToGVR.Delete(gvk)
 		} else {
-			return cachedGVR.Value(), nil
+			return cachedGVR.Value(), false, nil
 		}
 	}
 
 	rsrcList, err := d.client.Discovery().ServerResourcesForGroupVersion(gvk.GroupVersion().String())
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			return schema.GroupVersionResource{}, fmt.Errorf("%w: %s", ErrNoVersionedResource, gvk.String())
+			return schema.GroupVersionResource{}, false, fmt.Errorf("%w: %s", ErrNoVersionedResource, gvk.String())
 		}
 
-		return schema.GroupVersionResource{}, err
+		return schema.GroupVersionResource{}, false, err
 	}
 
 	for _, rsrc := range rsrcList.APIResources {
@@ -559,11 +565,11 @@ func (d *dynamicWatcher) gvrFromObjectIdentifier(watchedObject ObjectIdentifier)
 			// Cache the value
 			d.gvkToGVR.Set(gvk, gvr, ttlcache.DefaultTTL)
 
-			return gvr, nil
+			return gvr, rsrc.Namespaced, nil
 		}
 	}
 
-	return schema.GroupVersionResource{}, fmt.Errorf(
+	return schema.GroupVersionResource{}, false, fmt.Errorf(
 		"%w: no matching kind was found: %s", ErrNoVersionedResource, gvk.String(),
 	)
 }

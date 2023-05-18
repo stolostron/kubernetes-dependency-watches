@@ -46,7 +46,9 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 
 		watchedObjIDs = []ObjectIdentifier{}
 		for _, watchedObj := range watched {
-			watchedObjIDs = append(watchedObjIDs, toObjectIdentifer(watchedObj))
+			id := toObjectIdentifer(watchedObj)
+			id.Namespace = namespace // ensure namespace is set, even (possibly "incorrectly") on cluster-scoped objects
+			watchedObjIDs = append(watchedObjIDs, id)
 		}
 
 		go func() {
