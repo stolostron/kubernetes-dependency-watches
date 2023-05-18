@@ -32,7 +32,7 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 		cancelCtxTest         context.CancelFunc
 		dynamicWatcher        DynamicWatcher
 		ctrlRuntimeReconciler controllerRuntimeReconciler
-		watched               []*corev1.Secret
+		watched               []k8sObject
 		watchedObjIDs         []ObjectIdentifier
 		watcher               *corev1.ConfigMap
 	)
@@ -89,14 +89,17 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 	})
 
 	AfterEach(func() {
-		for _, objectID := range watched {
-			err := k8sClient.CoreV1().Secrets(namespace).Delete(ctxTest, objectID.Name, metav1.DeleteOptions{})
-			if !k8serrors.IsNotFound(err) {
-				Expect(err).ToNot(HaveOccurred())
-			}
+		err := k8sClient.CoreV1().Secrets(namespace).Delete(ctxTest, watched[0].GetName(), metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
 		}
 
-		err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctxTest, watcher.Name, metav1.DeleteOptions{})
+		err = k8sClient.RbacV1().ClusterRoles().Delete(ctxTest, watched[1].GetName(), metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
+		}
+
+		err = k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctxTest, watcher.Name, metav1.DeleteOptions{})
 		if !k8serrors.IsNotFound(err) {
 			Expect(err).ToNot(HaveOccurred())
 		}
@@ -112,8 +115,9 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 		Eventually(func() int { return ctrlRuntimeReconciler.ReconcileCount }, "5s").Should(Equal(1))
 
 		By("Updating a watched object to trigger a reconcile")
-		watched[0].StringData = map[string]string{"hello": "world"}
-		watched[0], err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watched[0], metav1.UpdateOptions{})
+		watchedSecret := watched[0].(*corev1.Secret)
+		watchedSecret.StringData = map[string]string{"hello": "world"}
+		watched[0], err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watchedSecret, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		By("Verifying that the controller-runtime reconciler was triggered")
