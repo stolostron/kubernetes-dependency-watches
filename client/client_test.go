@@ -10,6 +10,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -47,7 +48,7 @@ func (r *reconciler) Reconcile(_ context.Context, watcher ObjectIdentifier) (rec
 }
 
 func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
-	watcher *corev1.ConfigMap, watched []*corev1.Secret, dynamicWatcher DynamicWatcher,
+	watcher *corev1.ConfigMap, watched []k8sObject, dynamicWatcher DynamicWatcher,
 ) {
 	watcher = &corev1.ConfigMap{
 		// This verbose definition is required for the GVK to be present on the object.
@@ -65,24 +66,38 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
 	_, err = k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, watcher, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
 
-	for _, name := range []string{"watched1", "watched2"} {
-		obj := &corev1.Secret{
-			// This verbose definition is required for the GVK to be present on the object.
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: "v1",
-				Kind:       "Secret",
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      name,
-				Namespace: namespace,
-			},
-		}
-
-		_, err = k8sClient.CoreV1().Secrets(namespace).Create(ctx, obj, metav1.CreateOptions{})
-		Expect(err).ToNot(HaveOccurred())
-
-		watched = append(watched, obj)
+	watchedSecret := &corev1.Secret{
+		// This verbose definition is required for the GVK to be present on the object.
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Secret",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "watched1",
+			Namespace: namespace,
+		},
 	}
+
+	_, err = k8sClient.CoreV1().Secrets(namespace).Create(ctx, watchedSecret, metav1.CreateOptions{})
+	Expect(err).ToNot(HaveOccurred())
+
+	watched = append(watched, watchedSecret)
+
+	watchedClusterRole := &rbacv1.ClusterRole{
+		// This verbose definition is required for the GVK to be present on the object.
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "rbac.authorization.k8s.io/v1",
+			Kind:       "ClusterRole",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "watched2",
+		},
+	}
+
+	_, err = k8sClient.RbacV1().ClusterRoles().Create(ctx, watchedClusterRole, metav1.CreateOptions{})
+	Expect(err).ToNot(HaveOccurred())
+
+	watched = append(watched, watchedClusterRole)
 
 	dynamicWatcher, err = New(k8sConfig, reconcilerObj, nil)
 	Expect(err).ToNot(HaveOccurred())
@@ -98,7 +113,7 @@ var _ = Describe("Test the client", Ordered, func() {
 		cancelCtxTest  context.CancelFunc
 		dynamicWatcher DynamicWatcher
 		reconcilerObj  *reconciler
-		watched        []*corev1.Secret
+		watched        []k8sObject
 		watchedObjIDs  []ObjectIdentifier
 		watcher        *corev1.ConfigMap
 	)
@@ -134,14 +149,17 @@ var _ = Describe("Test the client", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		for _, objectID := range watched {
-			err := k8sClient.CoreV1().Secrets(namespace).Delete(ctxTest, objectID.Name, metav1.DeleteOptions{})
-			if !k8serrors.IsNotFound(err) {
-				Expect(err).ToNot(HaveOccurred())
-			}
+		err := k8sClient.CoreV1().Secrets(namespace).Delete(ctxTest, watched[0].GetName(), metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
 		}
 
-		err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctxTest, watcher.Name, metav1.DeleteOptions{})
+		err = k8sClient.RbacV1().ClusterRoles().Delete(ctxTest, watched[1].GetName(), metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
+		}
+
+		err = k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctxTest, watcher.Name, metav1.DeleteOptions{})
 		if !k8serrors.IsNotFound(err) {
 			Expect(err).ToNot(HaveOccurred())
 		}
@@ -203,8 +221,9 @@ var _ = Describe("Test the client", Ordered, func() {
 
 	It("Ensures the reconciler is called", func() {
 		By("Updating a watched object")
-		watched[0].Labels = map[string]string{"watch": "me"}
-		_, err := k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watched[0], metav1.UpdateOptions{})
+		watchedSecret := watched[0].(*corev1.Secret)
+		watchedSecret.Labels = map[string]string{"watch": "me"}
+		_, err := k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watchedSecret, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		Eventually(reconcilerObj.ResultsChan, "5s").Should(HaveLen(1))
@@ -234,7 +253,7 @@ var _ = Describe("Test the client", Ordered, func() {
 	})
 
 	It("Removes the watcher", func() {
-		By("Verifying than an error is returned when watcher is invalid")
+		By("Verifying that an error is returned when watcher is invalid")
 		err := dynamicWatcher.RemoveWatcher(ObjectIdentifier{})
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
@@ -263,8 +282,9 @@ var _ = Describe("Test the client", Ordered, func() {
 		Expect(reconcilerObj.ResultsChan).Should(BeEmpty())
 
 		By("Updating a previously watched object to ensure no reconcile is called")
-		watched[0].Labels = map[string]string{"watch": "me-too"}
-		_, err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watched[0], metav1.UpdateOptions{})
+		watchedSecret := watched[0].(*corev1.Secret)
+		watchedSecret.Labels = map[string]string{"watch": "me-too"}
+		_, err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watchedSecret, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		Consistently(reconcilerObj.ResultsChan, "3s").Should(HaveLen(0))
@@ -276,7 +296,7 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 		ctxTest        context.Context
 		cancelCtxTest  context.CancelFunc
 		dynamicWatcher DynamicWatcher
-		watched        []*corev1.Secret
+		watched        []k8sObject
 		watcher        *corev1.ConfigMap
 	)
 
@@ -298,15 +318,17 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 	})
 
 	AfterAll(func() {
-		for _, objectID := range watched {
-			// Use the parent context since ctxTest is closed during the test.
-			err := k8sClient.CoreV1().Secrets(namespace).Delete(ctx, objectID.Name, metav1.DeleteOptions{})
-			if !k8serrors.IsNotFound(err) {
-				Expect(err).ToNot(HaveOccurred())
-			}
+		err := k8sClient.CoreV1().Secrets(namespace).Delete(ctx, watched[0].GetName(), metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
 		}
 
-		err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, watcher.Name, metav1.DeleteOptions{})
+		err = k8sClient.RbacV1().ClusterRoles().Delete(ctx, watched[1].GetName(), metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
+		}
+
+		err = k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, watcher.Name, metav1.DeleteOptions{})
 		if !k8serrors.IsNotFound(err) {
 			Expect(err).ToNot(HaveOccurred())
 		}
