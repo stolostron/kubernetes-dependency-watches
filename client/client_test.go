@@ -127,7 +127,9 @@ var _ = Describe("Test the client", Ordered, func() {
 
 		watchedObjIDs = []ObjectIdentifier{}
 		for _, watchedObj := range watched {
-			watchedObjIDs = append(watchedObjIDs, toObjectIdentifer(watchedObj))
+			id := toObjectIdentifer(watchedObj)
+			id.Namespace = namespace // ensure namespace is set, even (possibly "incorrectly") on cluster-scoped objects
+			watchedObjIDs = append(watchedObjIDs, id)
 		}
 
 		go func() {
@@ -337,7 +339,9 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 	It("Verifies the client cleans up watches", func() {
 		watchedObjIDs := []ObjectIdentifier{}
 		for _, watchedObj := range watched {
-			watchedObjIDs = append(watchedObjIDs, toObjectIdentifer(watchedObj))
+			id := toObjectIdentifer(watchedObj)
+			id.Namespace = namespace // ensure namespace is set, even (possibly "incorrectly") on cluster-scoped objects
+			watchedObjIDs = append(watchedObjIDs, id)
 		}
 
 		By("Adding the watcher with two watched objects")
