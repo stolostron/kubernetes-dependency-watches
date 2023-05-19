@@ -119,7 +119,7 @@ func New(config *rest.Config, reconciler Reconciler, options *Options) (DynamicW
 	}
 
 	gvkToGVRCache := ttlcache.New(
-		ttlcache.WithTTL[schema.GroupVersionKind, schema.GroupVersionResource](10 * time.Minute),
+		ttlcache.WithTTL[schema.GroupVersionKind, scopedGVR](10 * time.Minute),
 	)
 	// This will periodically delete expired cache items.
 	go gvkToGVRCache.Start()
@@ -139,6 +139,11 @@ func New(config *rest.Config, reconciler Reconciler, options *Options) (DynamicW
 	return &watcher, nil
 }
 
+type scopedGVR struct {
+	schema.GroupVersionResource
+	namespaced bool
+}
+
 // dynamicWatcher implements the DynamicWatcher interface.
 type dynamicWatcher struct {
 	// dynamicClient is a client-go dynamic client used for the dynamic watches.
@@ -151,7 +156,7 @@ type dynamicWatcher struct {
 	rateLimiter ratelimiter.RateLimiter
 	// gvkToGVR is used as a cache of GVK to GVR mappings. The cache entries automatically expire every 10 minutes when
 	// using the New function.
-	gvkToGVR *ttlcache.Cache[schema.GroupVersionKind, schema.GroupVersionResource]
+	gvkToGVR *ttlcache.Cache[schema.GroupVersionKind, scopedGVR]
 	// started gets set as part of the Start method.
 	started bool
 	// startedChan is closed when the dynamicWatcher is started. This is exposed to the user through the Started method.
@@ -371,7 +376,7 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 	watchesAdded := []ObjectIdentifier{}
 
 	for _, watchedObject := range watchedObjects {
-		gvr, namespaced, err := d.gvrFromObjectIdentifier(watchedObject)
+		gvr, err := d.gvrFromObjectIdentifier(watchedObject)
 		if err != nil {
 			klog.Errorf("Could not get the GVR for %s, error: %v", watchedObject, err)
 
@@ -380,7 +385,7 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 			break
 		}
 
-		if !namespaced { // ignore namespaces set on cluster-scoped resources
+		if !gvr.namespaced { // ignore namespaces set on cluster-scoped resources
 			watchedObject.Namespace = ""
 		}
 
@@ -403,7 +408,7 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 			continue
 		}
 
-		var resource dynamic.ResourceInterface = d.dynamicClient.Resource(gvr)
+		var resource dynamic.ResourceInterface = d.dynamicClient.Resource(gvr.GroupVersionResource)
 		if watchedObject.Namespace != "" {
 			resource = resource.(dynamic.NamespaceableResourceInterface).Namespace(watchedObject.Namespace)
 		}
@@ -528,9 +533,7 @@ func (d *dynamicWatcher) GetWatchCount() uint {
 
 // gvrFromObjectIdentifier uses the discovery client to get the versioned resource and whether it is
 // namespaced. If the resource is not found or could not be retrieved, an error is always returned.
-func (d *dynamicWatcher) gvrFromObjectIdentifier(watchedObject ObjectIdentifier) (
-	schema.GroupVersionResource, bool, error,
-) {
+func (d *dynamicWatcher) gvrFromObjectIdentifier(watchedObject ObjectIdentifier) (scopedGVR, error) {
 	gvk := schema.GroupVersionKind{
 		Group: watchedObject.Group, Version: watchedObject.Version, Kind: watchedObject.Kind,
 	}
@@ -541,35 +544,38 @@ func (d *dynamicWatcher) gvrFromObjectIdentifier(watchedObject ObjectIdentifier)
 		if cachedGVR.IsExpired() {
 			d.gvkToGVR.Delete(gvk)
 		} else {
-			return cachedGVR.Value(), false, nil
+			return cachedGVR.Value(), nil
 		}
 	}
 
 	rsrcList, err := d.client.Discovery().ServerResourcesForGroupVersion(gvk.GroupVersion().String())
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			return schema.GroupVersionResource{}, false, fmt.Errorf("%w: %s", ErrNoVersionedResource, gvk.String())
+			return scopedGVR{}, fmt.Errorf("%w: %s", ErrNoVersionedResource, gvk.String())
 		}
 
-		return schema.GroupVersionResource{}, false, err
+		return scopedGVR{}, err
 	}
 
 	for _, rsrc := range rsrcList.APIResources {
 		if rsrc.Kind == gvk.Kind {
-			gvr := schema.GroupVersionResource{
-				Group:    gvk.Group,
-				Version:  gvk.Version,
-				Resource: rsrc.Name,
+			gvr := scopedGVR{
+				GroupVersionResource: schema.GroupVersionResource{
+					Group:    gvk.Group,
+					Version:  gvk.Version,
+					Resource: rsrc.Name,
+				},
+				namespaced: rsrc.Namespaced,
 			}
 
 			// Cache the value
 			d.gvkToGVR.Set(gvk, gvr, ttlcache.DefaultTTL)
 
-			return gvr, rsrc.Namespaced, nil
+			return gvr, nil
 		}
 	}
 
-	return schema.GroupVersionResource{}, false, fmt.Errorf(
+	return scopedGVR{}, fmt.Errorf(
 		"%w: no matching kind was found: %s", ErrNoVersionedResource, gvk.String(),
 	)
 }
