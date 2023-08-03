@@ -55,11 +55,13 @@ type ObjectIdentifier struct {
 	Kind      string
 	Namespace string
 	Name      string
+	Selector  string
 }
 
 // String will convert the ObjectIdentifer to a string in a similar format to apimachinery's schema.GroupVersionKind.
 func (o ObjectIdentifier) String() string {
-	return o.Group + "/" + o.Version + ", Kind=" + o.Kind + ", Namespace=" + o.Namespace + ", Name=" + o.Name
+	return fmt.Sprintf("%v/%v, Kind=%v, Namespace=%v, Name=%v, Selector=%v",
+		o.Group, o.Version, o.Kind, o.Namespace, o.Name, o.Selector)
 }
 
 // Validate will return a wrapped ErrInvalidInput error when a required field is not set on the ObjectIdentifier.
@@ -72,8 +74,18 @@ func (o ObjectIdentifier) Validate() error {
 		return fmt.Errorf("%w: the ObjectIdentifier (%s) Kind must be set", ErrInvalidInput, o)
 	}
 
-	if o.Name == "" {
-		return fmt.Errorf("%w: the ObjectIdentifier (%s) Name must be set", ErrInvalidInput, o)
+	if o.Name == "" && o.Selector == "" {
+		return fmt.Errorf("%w: the ObjectIdentifier (%s) either the Name or Selector must be set", ErrInvalidInput, o)
+	}
+
+	if o.Name != "" && o.Selector != "" {
+		return fmt.Errorf("%w: the ObjectIdentifier (%s) only one of Name or Selector can be set", ErrInvalidInput, o)
+	}
+
+	if o.Selector != "" {
+		if _, err := metav1.ParseToLabelSelector(o.Selector); err != nil {
+			return fmt.Errorf("%w: the ObjectIdentifier (%s) has an invalid Selector", ErrInvalidInput, o)
+		}
 	}
 
 	return nil
@@ -458,12 +470,16 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 // starts the watch using the client-go RetryWatcher API. The returned bool indicates that the input watched object
 // exists on the cluster.
 func watchLatest(watchedObject ObjectIdentifier, resource dynamic.ResourceInterface) (apiWatch.Interface, bool, error) {
-	fieldSelector := "metadata.name=" + watchedObject.Name
 	timeout := int64(10)
+	listOpts := metav1.ListOptions{TimeoutSeconds: &timeout}
 
-	listResult, err := resource.List(
-		context.TODO(), metav1.ListOptions{FieldSelector: fieldSelector, TimeoutSeconds: &timeout},
-	)
+	if watchedObject.Name != "" {
+		listOpts.FieldSelector = "metadata.name=" + watchedObject.Name
+	} else {
+		listOpts.LabelSelector = watchedObject.Selector
+	}
+
+	listResult, err := resource.List(context.TODO(), listOpts)
 	if err != nil {
 		return nil, false, err
 	}
@@ -471,7 +487,11 @@ func watchLatest(watchedObject ObjectIdentifier, resource dynamic.ResourceInterf
 	resourceVersion := listResult.GetResourceVersion()
 
 	watchFunc := func(options metav1.ListOptions) (apiWatch.Interface, error) {
-		options.FieldSelector = fieldSelector
+		if watchedObject.Name != "" {
+			options.FieldSelector = "metadata.name=" + watchedObject.Name
+		} else {
+			options.LabelSelector = watchedObject.Selector
+		}
 
 		return resource.Watch(context.Background(), options)
 	}
