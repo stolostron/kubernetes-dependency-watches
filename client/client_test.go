@@ -66,6 +66,13 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
 	_, err = k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, watcher, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
 
+	DeferCleanup(func(dctx context.Context) {
+		err = k8sClient.CoreV1().ConfigMaps(namespace).Delete(dctx, watcher.Name, metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
+		}
+	})
+
 	watchedSecret := &corev1.Secret{
 		// This verbose definition is required for the GVK to be present on the object.
 		TypeMeta: metav1.TypeMeta{
@@ -80,6 +87,13 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
 
 	_, err = k8sClient.CoreV1().Secrets(namespace).Create(ctx, watchedSecret, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
+
+	DeferCleanup(func(dctx context.Context) {
+		err := k8sClient.CoreV1().Secrets(namespace).Delete(dctx, watchedSecret.Name, metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
+		}
+	})
 
 	watched = append(watched, watchedSecret)
 
@@ -97,6 +111,13 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
 	_, err = k8sClient.RbacV1().ClusterRoles().Create(ctx, watchedClusterRole, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
 
+	DeferCleanup(func(dctx context.Context) {
+		err = k8sClient.RbacV1().ClusterRoles().Delete(dctx, watchedClusterRole.Name, metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
+		}
+	})
+
 	watched = append(watched, watchedClusterRole)
 
 	dynamicWatcher, err = New(k8sConfig, reconcilerObj, nil)
@@ -110,7 +131,6 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
 var _ = Describe("Test the client", Ordered, func() {
 	var (
 		ctxTest        context.Context
-		cancelCtxTest  context.CancelFunc
 		dynamicWatcher DynamicWatcher
 		reconcilerObj  *reconciler
 		watched        []k8sObject
@@ -119,7 +139,11 @@ var _ = Describe("Test the client", Ordered, func() {
 	)
 
 	BeforeAll(func() {
+		var cancelCtxTest context.CancelFunc
 		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+
+		DeferCleanup(func() { cancelCtxTest() })
+
 		reconcilerObj = &reconciler{
 			ResultsChan: make(chan ObjectIdentifier, 20),
 		}
@@ -148,25 +172,6 @@ var _ = Describe("Test the client", Ordered, func() {
 			_, ok := <-reconcilerObj.ResultsChan
 			Expect(ok).To(BeTrue())
 		}
-	})
-
-	AfterAll(func() {
-		err := k8sClient.CoreV1().Secrets(namespace).Delete(ctxTest, watched[0].GetName(), metav1.DeleteOptions{})
-		if !k8serrors.IsNotFound(err) {
-			Expect(err).ToNot(HaveOccurred())
-		}
-
-		err = k8sClient.RbacV1().ClusterRoles().Delete(ctxTest, watched[1].GetName(), metav1.DeleteOptions{})
-		if !k8serrors.IsNotFound(err) {
-			Expect(err).ToNot(HaveOccurred())
-		}
-
-		err = k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctxTest, watcher.Name, metav1.DeleteOptions{})
-		if !k8serrors.IsNotFound(err) {
-			Expect(err).ToNot(HaveOccurred())
-		}
-
-		cancelCtxTest()
 	})
 
 	It("Ensures watches are not added when invalid input is provided", func() {
@@ -295,6 +300,137 @@ var _ = Describe("Test the client", Ordered, func() {
 
 var _ = Describe("Test the client clean up", Ordered, func() {
 	var (
+		watcherID      ObjectIdentifier
+		dynamicWatcher DynamicWatcher
+		reconcilerObj  *reconciler
+	)
+
+	BeforeAll(func() {
+		testCtx, testCtxCancel := context.WithCancel(ctx)
+
+		DeferCleanup(func() { testCtxCancel() })
+
+		reconcilerObj = &reconciler{
+			ResultsChan: make(chan ObjectIdentifier, 20),
+		}
+
+		var watcher *corev1.ConfigMap
+		watcher, _, dynamicWatcher = getDynamicWatcher(testCtx, reconcilerObj)
+		watcherID = toObjectIdentifer(watcher)
+
+		go func() {
+			defer GinkgoRecover()
+
+			Expect(dynamicWatcher.Start(testCtx)).To(Succeed())
+		}()
+
+		<-dynamicWatcher.Started()
+	})
+
+	AfterEach(func() {
+		// Drain the test results channel.
+		for len(reconcilerObj.ResultsChan) != 0 {
+			_, ok := <-reconcilerObj.ResultsChan
+			Expect(ok).To(BeTrue())
+		}
+	})
+
+	It("Adds the watcher with a selector", func() {
+		watchedSelector := ObjectIdentifier{
+			Group:     "",
+			Version:   "v1",
+			Kind:      "ConfigMap",
+			Namespace: namespace,
+			Selector:  "test-label=foo",
+		}
+
+		Expect(dynamicWatcher.AddOrUpdateWatcher(watcherID, watchedSelector)).To(Succeed())
+
+		By("Checking there are no reconciles, since no matching objects exist")
+		Consistently(reconcilerObj.ResultsChan, "3s").Should(BeEmpty())
+	})
+
+	It("Reconciles when a matching object is created or deleted", func() {
+		cm := corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name:      "one",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"test-label": "foo",
+			},
+		}}
+
+		_, err := k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, &cm, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		DeferCleanup(func(dctx context.Context) {
+			err = k8sClient.CoreV1().ConfigMaps(namespace).Delete(dctx, cm.Name, metav1.DeleteOptions{})
+			if !k8serrors.IsNotFound(err) {
+				Expect(err).ToNot(HaveOccurred())
+			}
+		})
+
+		By("Checking there was a reconcile")
+		Eventually(reconcilerObj.ResultsChan, "3s").Should(HaveLen(1))
+		Consistently(reconcilerObj.ResultsChan, "3s").Should(HaveLen(1))
+
+		By("Deleting the object")
+		Expect(k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, cm.Name, metav1.DeleteOptions{})).To(Succeed())
+
+		By("Checking there was a reconcile")
+		Eventually(reconcilerObj.ResultsChan, "3s").Should(HaveLen(2))
+		Consistently(reconcilerObj.ResultsChan, "3s").Should(HaveLen(2))
+	})
+
+	It("Reconciles when an object is labeled to match the selector", func() {
+		cm := corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name:      "two",
+			Namespace: namespace,
+			Labels: map[string]string{
+				"test-label": "bar",
+			},
+		}}
+
+		_, err := k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, &cm, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		DeferCleanup(func(dctx context.Context) {
+			err = k8sClient.CoreV1().ConfigMaps(namespace).Delete(dctx, cm.Name, metav1.DeleteOptions{})
+			if !k8serrors.IsNotFound(err) {
+				Expect(err).ToNot(HaveOccurred())
+			}
+		})
+
+		By("Checking there was not a reconcile because the object doesn't match")
+		Consistently(reconcilerObj.ResultsChan, "3s").Should(BeEmpty())
+
+		By("Updating the label to make the label match the selector")
+		cm.Labels = map[string]string{"test-label": "foo"}
+		_, err = k8sClient.CoreV1().ConfigMaps(namespace).Update(ctx, &cm, metav1.UpdateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Checking there was a reconcile")
+		Eventually(reconcilerObj.ResultsChan, "3s").Should(HaveLen(1))
+		Consistently(reconcilerObj.ResultsChan, "3s").Should(HaveLen(1))
+
+		By("Updating the label to make the label not match the selector")
+		cm.Labels = map[string]string{"test-label": "baz"}
+		_, err = k8sClient.CoreV1().ConfigMaps(namespace).Update(ctx, &cm, metav1.UpdateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Checking there was a reconcile")
+		Eventually(reconcilerObj.ResultsChan, "3s").Should(HaveLen(2))
+		Consistently(reconcilerObj.ResultsChan, "3s").Should(HaveLen(2))
+
+		By("Deleting the object")
+		Expect(k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, cm.Name, metav1.DeleteOptions{})).Should(Succeed())
+
+		By("Checking there was not an additional reconcile")
+		Consistently(reconcilerObj.ResultsChan, "3s").Should(HaveLen(2))
+	})
+})
+
+var _ = Describe("Test the client clean up", Ordered, func() {
+	var (
 		ctxTest        context.Context
 		cancelCtxTest  context.CancelFunc
 		dynamicWatcher DynamicWatcher
@@ -304,6 +440,12 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 
 	BeforeAll(func() {
 		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+
+		DeferCleanup(func() {
+			// The test should cancel the context, but this ensures it is cancelled during a failure
+			cancelCtxTest()
+		})
+
 		reconcilerObj := &reconciler{
 			ResultsChan: make(chan ObjectIdentifier, 20),
 		}
@@ -317,23 +459,6 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 		}()
 
 		<-dynamicWatcher.Started()
-	})
-
-	AfterAll(func() {
-		err := k8sClient.CoreV1().Secrets(namespace).Delete(ctx, watched[0].GetName(), metav1.DeleteOptions{})
-		if !k8serrors.IsNotFound(err) {
-			Expect(err).ToNot(HaveOccurred())
-		}
-
-		err = k8sClient.RbacV1().ClusterRoles().Delete(ctx, watched[1].GetName(), metav1.DeleteOptions{})
-		if !k8serrors.IsNotFound(err) {
-			Expect(err).ToNot(HaveOccurred())
-		}
-
-		err = k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, watcher.Name, metav1.DeleteOptions{})
-		if !k8serrors.IsNotFound(err) {
-			Expect(err).ToNot(HaveOccurred())
-		}
 	})
 
 	It("Verifies the client cleans up watches", func() {
@@ -368,7 +493,7 @@ var _ = Describe("Test ObjectIdentifier", func() {
 			Namespace: "test-ns",
 			Name:      "watcher",
 		}
-		Expect(obj.String()).To(Equal("/v1, Kind=ConfigMap, Namespace=test-ns, Name=watcher"))
+		Expect(obj.String()).To(Equal("/v1, Kind=ConfigMap, Namespace=test-ns, Name=watcher, Selector="))
 	})
 
 	It("Verifies ObjectIdentifier.Validate", func() {
@@ -393,6 +518,18 @@ var _ = Describe("Test ObjectIdentifier", func() {
 		obj.Kind = "ConfigMap"
 
 		obj.Name = ""
+		err = obj.Validate()
+		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
+
+		obj.Selector = "example.test/label=foo"
+		Expect(obj.Validate()).To(Succeed())
+
+		obj.Name = "watcher"
+		err = obj.Validate()
+		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
+
+		obj.Name = ""
+		obj.Selector = "something-random!="
 		err = obj.Validate()
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 	})
