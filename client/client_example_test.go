@@ -3,9 +3,13 @@ package client_test
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -18,10 +22,7 @@ import (
 
 type reconciler struct{}
 
-func (r *reconciler) Reconcile(_ context.Context, watcher client.ObjectIdentifier) (reconcile.Result, error) {
-	//nolint: forbidigo
-	fmt.Printf("An object that this object (%s) was watching was updated\n", watcher)
-
+func (r *reconciler) Reconcile(_ context.Context, _ client.ObjectIdentifier) (reconcile.Result, error) {
 	return reconcile.Result{}, nil
 }
 
@@ -210,4 +211,159 @@ func ExampleNewControllerRuntimeSource() {
 	}
 
 	// Output:
+}
+
+func ExampleDynamicWatcher_Get() { //nolint: nosnakecase
+	// Start a test Kubernetes API.
+	testEnv := envtest.Environment{}
+
+	k8sConfig, err := testEnv.Start()
+	if err != nil {
+		panic(err)
+	}
+
+	// Create two test secrets to watch and cache
+	k8sClient, err := kubernetes.NewForConfig(k8sConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	namespace := corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "example",
+		},
+	}
+
+	_, err = k8sClient.CoreV1().Namespaces().Create(context.TODO(), &namespace, metav1.CreateOptions{})
+	if err != nil {
+		panic(err)
+	}
+
+	secret1 := corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "watched1",
+			Namespace: "example",
+		},
+	}
+
+	_, err = k8sClient.CoreV1().Secrets("example").Create(context.TODO(), &secret1, metav1.CreateOptions{})
+	if err != nil {
+		panic(err)
+	}
+
+	secret2 := corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "watched2",
+			Namespace: "example",
+		},
+	}
+
+	_, err = k8sClient.CoreV1().Secrets("example").Create(context.TODO(), &secret2, metav1.CreateOptions{})
+	if err != nil {
+		panic(err)
+	}
+
+	defer func() {
+		err := testEnv.Stop()
+		if err != nil {
+			klog.Errorf("failed to stop the test Kubernetes API, error: %v", err)
+		}
+	}()
+
+	// Create the dynamic watcher with the cache enabled.
+	dynamicWatcher, err := client.New(k8sConfig, &reconciler{}, &client.Options{EnableCache: true})
+	if err != nil {
+		panic(err)
+	}
+
+	// Create a child context that can be explicitly canceled.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start the dynamic watcher in a separate goroutine to not block the main goroutine.
+	go func() {
+		err := dynamicWatcher.Start(ctx)
+		if err != nil {
+			panic(err)
+		}
+	}()
+
+	// Wait until the dynamic watcher has started.
+	<-dynamicWatcher.Started()
+
+	// Simulate something canceling the context in 5 seconds so that the example exits.
+	go func() {
+		time.Sleep(5 * time.Second)
+
+		cancel()
+	}()
+
+	watcher := client.ObjectIdentifier{
+		Group:     "",
+		Version:   "v1",
+		Kind:      "ConfigMap",
+		Namespace: "example",
+		Name:      "watcher",
+	}
+
+	// Starting a query batch associates the get queries below as watched objects of this watcher.
+	err = dynamicWatcher.StartQueryBatch(watcher)
+	if err != nil {
+		panic(err)
+	}
+
+	gvk := schema.GroupVersionKind{Version: "v1", Kind: "Secret"}
+
+	// This creates a watch on watched1 and caches the object.
+	cachedSecret1, err := dynamicWatcher.Get(watcher, gvk, "example", "watched1")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(cachedSecret1.GetName())
+
+	// This creates a watch on watched1 and caches the object.
+	cachedSecret2, err := dynamicWatcher.Get(watcher, gvk, "example", "watched2")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(cachedSecret2.GetName())
+
+	// Ending a query batch will clean up any previous watches not referenced in the batch. In this case, there were
+	// none.
+	err = dynamicWatcher.EndQueryBatch(watcher)
+	if err != nil {
+		panic(err)
+	}
+
+	// Retrieve directly from the cache
+	cachedSecret1, err = dynamicWatcher.GetFromCache(gvk, "example", "watched1")
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(cachedSecret1.GetName())
+
+	// Retrieve watched objects from the cache for the watcher
+	cachedSecrets, err := dynamicWatcher.ListWatchedFromCache(watcher)
+	if err != nil {
+		panic(err)
+	}
+
+	// Sort the slice so the output is consistent for the output validation
+	sort.Slice(cachedSecrets, func(i, j int) bool { return cachedSecrets[i].GetName() < cachedSecrets[j].GetName() })
+
+	for _, cachedSecret := range cachedSecrets {
+		fmt.Println(cachedSecret.GetName())
+	}
+
+	// Run until the context is canceled.
+	<-ctx.Done()
+
+	// Output:
+	// watched1
+	// watched2
+	// watched1
+	// watched1
+	// watched2
 }

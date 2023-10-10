@@ -42,7 +42,7 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 
 		ctrlRuntimeReconciler = controllerRuntimeReconciler{}
 		reconciler, sourceChan := NewControllerRuntimeSource()
-		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconciler)
+		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconciler, nil)
 
 		watchedObjIDs = []ObjectIdentifier{}
 		for _, watchedObj := range watched {

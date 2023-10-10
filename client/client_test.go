@@ -13,6 +13,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -47,7 +48,7 @@ func (r *reconciler) Reconcile(_ context.Context, watcher ObjectIdentifier) (rec
 	return reconcile.Result{}, nil
 }
 
-func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
+func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler, options *Options) (
 	watcher *corev1.ConfigMap, watched []k8sObject, dynamicWatcher DynamicWatcher,
 ) {
 	watcher = &corev1.ConfigMap{
@@ -120,7 +121,7 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler) (
 
 	watched = append(watched, watchedClusterRole)
 
-	dynamicWatcher, err = New(k8sConfig, reconcilerObj, nil)
+	dynamicWatcher, err = New(k8sConfig, reconcilerObj, options)
 	Expect(err).ToNot(HaveOccurred())
 	Expect(dynamicWatcher).NotTo(BeNil())
 
@@ -147,7 +148,7 @@ var _ = Describe("Test the client", Ordered, func() {
 		reconcilerObj = &reconciler{
 			ResultsChan: make(chan ObjectIdentifier, 20),
 		}
-		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconcilerObj)
+		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconcilerObj, nil)
 
 		watchedObjIDs = []ObjectIdentifier{}
 		for _, watchedObj := range watched {
@@ -176,14 +177,23 @@ var _ = Describe("Test the client", Ordered, func() {
 
 	It("Ensures watches are not added when invalid input is provided", func() {
 		By("Verifying that an error is returned when no watched objects are provided")
-		err := dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher))
+		err := dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), ObjectIdentifier{})
+		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
+
+		err = dynamicWatcher.AddOrUpdateWatcher(ObjectIdentifier{}, watchedObjIDs...)
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
 		By("Verifying that an error is returned when an invalid watcher object is provided")
+		err = dynamicWatcher.AddWatcher(ObjectIdentifier{}, watchedObjIDs[0])
+		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
+
 		err = dynamicWatcher.AddOrUpdateWatcher(ObjectIdentifier{}, watchedObjIDs...)
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
 		By("Verifying that an error is returned when an invalid watched object is provided")
+		err = dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), ObjectIdentifier{})
+		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
+
 		err = dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), ObjectIdentifier{})
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
@@ -195,16 +205,36 @@ var _ = Describe("Test the client", Ordered, func() {
 			Namespace: "test-ns",
 			Name:      "watcher",
 		}
+		err = dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), obj)
+		Expect(err).To(HaveOccurred())
+
 		err = dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs[0], obj)
 		Expect(err).To(HaveOccurred())
 
 		By("Verifying that the previous encountered error resulted in the watch being cleaned up")
 		Eventually(dynamicWatcher.GetWatchCount, "3s").Should(Equal(uint(0)))
+
+		By("Verifying that the existing watchers are retained when the watched object does not have a CRD installed")
+		err = dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), toObjectIdentifer(watched[0]))
+		Expect(err).ToNot(HaveOccurred())
+		Eventually(dynamicWatcher.GetWatchCount, "3s").Should(Equal(uint(1)))
+
+		err = dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), obj)
+		Expect(err).To(HaveOccurred())
+
+		err = dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), obj)
+		Expect(err).To(HaveOccurred())
+		Expect(dynamicWatcher.GetWatchCount()).Should(Equal(uint(1)))
+
+		// Clean up the watch
+		err = dynamicWatcher.RemoveWatcher(toObjectIdentifer(watcher))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.GetWatchCount()).Should(Equal(uint(0)))
 	})
 
 	It("Adds watches", func() {
 		By("Adding the watcher with a single watched object")
-		err := dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs[0])
+		err := dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), watchedObjIDs[0])
 		Expect(err).ToNot(HaveOccurred())
 
 		By("Checking that the reconciler was called during the initial list")
@@ -315,7 +345,7 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 		}
 
 		var watcher *corev1.ConfigMap
-		watcher, _, dynamicWatcher = getDynamicWatcher(testCtx, reconcilerObj)
+		watcher, _, dynamicWatcher = getDynamicWatcher(testCtx, reconcilerObj, nil)
 		watcherID = toObjectIdentifer(watcher)
 
 		go func() {
@@ -449,7 +479,7 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 		reconcilerObj := &reconciler{
 			ResultsChan: make(chan ObjectIdentifier, 20),
 		}
-		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconcilerObj)
+		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconcilerObj, nil)
 
 		go func() {
 			defer GinkgoRecover()
@@ -720,13 +750,423 @@ var _ = Describe("Test dynamicWatcher not started", func() {
 
 	It("Does not allow adding a watch when not started", func() {
 		dynWatcher := dynamicWatcher{}
+		err := dynWatcher.AddWatcher(watcher, watched)
+		Expect(err).To(MatchError(ErrNotStarted))
+	})
+
+	It("Does not allow updating a watch when not started", func() {
+		dynWatcher := dynamicWatcher{}
 		err := dynWatcher.AddOrUpdateWatcher(watcher, watched)
-		Expect(errors.Is(err, ErrNotStarted)).To(BeTrue())
+		Expect(err).To(MatchError(ErrNotStarted))
 	})
 
 	It("Does not allow removing a watch when not started", func() {
 		dynWatcher := dynamicWatcher{}
 		err := dynWatcher.RemoveWatcher(watcher)
-		Expect(errors.Is(err, ErrNotStarted)).To(BeTrue())
+		Expect(err).To(MatchError(ErrNotStarted))
+	})
+
+	It("Does not allow getting an object when not started", func() {
+		dynWatcher := dynamicWatcher{}
+		_, err := dynWatcher.Get(watcher, watched.GroupVersionKind(), watched.Namespace, watched.Name)
+		Expect(err).To(MatchError(ErrNotStarted))
+	})
+
+	It("Does not allow listing an object when not started", func() {
+		dynWatcher := dynamicWatcher{}
+		_, err := dynWatcher.List(watcher, watched.GroupVersionKind(), "a-namespace", nil)
+		Expect(err).To(MatchError(ErrNotStarted))
+	})
+
+	It("Does not allow starting a query batch when not started", func() {
+		dynWatcher := dynamicWatcher{}
+		err := dynWatcher.StartQueryBatch(watcher)
+		Expect(err).To(MatchError(ErrNotStarted))
+	})
+
+	It("Does not allow stopping a query batch when not started", func() {
+		dynWatcher := dynamicWatcher{}
+		err := dynWatcher.EndQueryBatch(watcher)
+		Expect(err).To(MatchError(ErrNotStarted))
+	})
+})
+
+var _ = Describe("Test dynamicWatcher cache disabled errors", Ordered, func() {
+	var (
+		ctxTest        context.Context
+		dynamicWatcher DynamicWatcher
+		reconcilerObj  *reconciler
+		watched        []k8sObject
+		watcher        *corev1.ConfigMap
+		watcherID      ObjectIdentifier
+	)
+
+	BeforeAll(func() {
+		var cancelCtxTest context.CancelFunc
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+
+		DeferCleanup(func() { cancelCtxTest() })
+
+		reconcilerObj = &reconciler{
+			ResultsChan: make(chan ObjectIdentifier, 20),
+		}
+		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconcilerObj, nil)
+		watcherID = toObjectIdentifer(watcher)
+
+		go func() {
+			defer GinkgoRecover()
+
+			err := dynamicWatcher.Start(ctxTest)
+			Expect(err).ToNot(HaveOccurred())
+		}()
+
+		<-dynamicWatcher.Started()
+	})
+
+	It("Does not allow getting an object when disabled", func() {
+		_, err := dynamicWatcher.Get(
+			watcherID, watched[0].GroupVersionKind(), watched[0].GetNamespace(), watched[0].GetName(),
+		)
+		Expect(err).To(MatchError(ErrCacheDisabled))
+
+		_, err = dynamicWatcher.GetFromCache(
+			watched[0].GroupVersionKind(), watched[0].GetNamespace(), watched[0].GetName(),
+		)
+		Expect(err).To(MatchError(ErrCacheDisabled))
+	})
+
+	It("Does not allow listing objects when disabled", func() {
+		_, err := dynamicWatcher.List(watcherID, watched[0].GroupVersionKind(), "a-namespace", nil)
+		Expect(err).To(MatchError(ErrCacheDisabled))
+
+		_, err = dynamicWatcher.ListFromCache(watched[0].GroupVersionKind(), "a-namespace", nil)
+		Expect(err).To(MatchError(ErrCacheDisabled))
+
+		_, err = dynamicWatcher.ListWatchedFromCache(watcherID)
+		Expect(err).To(MatchError(ErrCacheDisabled))
+	})
+
+	It("Does not allow starting a query batch when disabled", func() {
+		err := dynamicWatcher.StartQueryBatch(watcherID)
+		Expect(err).To(MatchError(ErrCacheDisabled))
+	})
+
+	It("Does not allow stopping a query batch when disabled", func() {
+		err := dynamicWatcher.EndQueryBatch(watcherID)
+		Expect(err).To(MatchError(ErrCacheDisabled))
+	})
+})
+
+var _ = Describe("Test the client query API", Ordered, func() {
+	var (
+		ctxTest        context.Context
+		dynamicWatcher DynamicWatcher
+		reconcilerObj  *reconciler
+		watched        []k8sObject
+		watcher        *corev1.ConfigMap
+		watcherID      ObjectIdentifier
+	)
+
+	BeforeAll(func() {
+		var cancelCtxTest context.CancelFunc
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+
+		DeferCleanup(func() { cancelCtxTest() })
+
+		reconcilerObj = &reconciler{
+			ResultsChan: make(chan ObjectIdentifier, 20),
+		}
+		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconcilerObj, &Options{EnableCache: true})
+		watcherID = toObjectIdentifer(watcher)
+
+		go func() {
+			defer GinkgoRecover()
+
+			err := dynamicWatcher.Start(ctxTest)
+			Expect(err).ToNot(HaveOccurred())
+		}()
+
+		<-dynamicWatcher.Started()
+	})
+
+	AfterAll(func() {
+		for _, name := range []string{"random-watched", "configmap-for-list1", "configmap-for-list2"} {
+			err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
+			if !k8serrors.IsNotFound(err) {
+				Expect(err).ToNot(HaveOccurred())
+			}
+		}
+	})
+
+	AfterEach(func() {
+		// Drain the test results channel.
+		for len(reconcilerObj.ResultsChan) != 0 {
+			_, ok := <-reconcilerObj.ResultsChan
+			Expect(ok).To(BeTrue())
+		}
+	})
+
+	It("Does not allow Get calls when the batch isn't started", func() {
+		_, err := dynamicWatcher.Get(
+			watcherID, watched[0].GroupVersionKind(), watched[0].GetNamespace(), watched[0].GetName(),
+		)
+
+		Expect(err).To(MatchError(ErrQueryBatchNotStarted))
+	})
+
+	It("Does not allow List calls when the batch isn't started", func() {
+		_, err := dynamicWatcher.List(watcherID, watched[0].GroupVersionKind(), "", nil)
+
+		Expect(err).To(MatchError(ErrQueryBatchNotStarted))
+	})
+
+	It("Does not allow to end a query batch when the batch isn't started", func() {
+		err := dynamicWatcher.EndQueryBatch(watcherID)
+
+		Expect(err).To(MatchError(ErrQueryBatchNotStarted))
+	})
+
+	It("Allows directly adding watches before a query batch is started", func() {
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(0)))
+
+		cm := corev1.ConfigMap{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "ConfigMap",
+				APIVersion: "v1",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "random-watched",
+				Namespace: namespace,
+			},
+		}
+		_, err := k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, &cm, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		err = dynamicWatcher.AddOrUpdateWatcher(watcherID, toObjectIdentifer(&cm))
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(1)))
+	})
+
+	It("Utilizies the Get query API", func() {
+		Expect(dynamicWatcher.StartQueryBatch(watcherID)).ToNot(HaveOccurred())
+
+		cachedObj1, err := dynamicWatcher.Get(
+			watcherID, watched[0].GroupVersionKind(), watched[0].GetNamespace(), watched[0].GetName(),
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(cachedObj1.GroupVersionKind()).To(Equal(watched[0].GroupVersionKind()))
+		Expect(cachedObj1.GetNamespace()).To(Equal(watched[0].GetNamespace()))
+		Expect(cachedObj1.GetName()).To(Equal(watched[0].GetName()))
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
+	})
+
+	It("A duplicate Get query does not cause another watch", func() {
+		cachedObj1, err := dynamicWatcher.Get(
+			watcherID, watched[0].GroupVersionKind(), watched[0].GetNamespace(), watched[0].GetName(),
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(cachedObj1.GroupVersionKind()).To(Equal(watched[0].GroupVersionKind()))
+		Expect(cachedObj1.GetNamespace()).To(Equal(watched[0].GetNamespace()))
+		Expect(cachedObj1.GetName()).To(Equal(watched[0].GetName()))
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
+	})
+
+	It("Does not allow to start a query batch when the batch is already started", func() {
+		err := dynamicWatcher.StartQueryBatch(watcherID)
+
+		Expect(err).To(MatchError(ErrQueryBatchInProgress))
+	})
+
+	It("Gets an updated cache entry from an update", func() {
+		cm, err := k8sClient.CoreV1().ConfigMaps(namespace).Get(ctx, "random-watched", metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		cm.Annotations = map[string]string{"sometimes-i-feel-like": "somebody's-watching-me"}
+		_, err = k8sClient.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		configmapGVK := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+
+		Eventually(func(g Gomega) {
+			cachedObject, err := dynamicWatcher.GetFromCache(configmapGVK, namespace, cm.Name)
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(cachedObject).ToNot(BeNil())
+			g.Expect(cachedObject.GetAnnotations()["sometimes-i-feel-like"]).To(Equal("somebody's-watching-me"))
+		}, "5s").Should(Succeed())
+	})
+
+	It("Gets an updated cache entry from a delete", func() {
+		err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, "random-watched", metav1.DeleteOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		configmapGVK := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+
+		Eventually(func(g Gomega) {
+			cachedObject, err := dynamicWatcher.GetFromCache(configmapGVK, namespace, "random-watched")
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(cachedObject).To(BeNil())
+		}, "5s").Should(Succeed())
+	})
+
+	It("Returns the cached objects for the watcher", func() {
+		cachedWatches, err := dynamicWatcher.ListWatchedFromCache(watcherID)
+
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cachedWatches).To(HaveLen(1))
+		Expect(cachedWatches[0].GroupVersionKind()).To(Equal(watched[0].GroupVersionKind()))
+		Expect(cachedWatches[0].GetNamespace()).To(Equal(watched[0].GetNamespace()))
+		Expect(cachedWatches[0].GetName()).To(Equal(watched[0].GetName()))
+	})
+
+	It("Returns the cached object for a watch", func() {
+		cachedWatch, err := dynamicWatcher.GetFromCache(
+			watched[0].GroupVersionKind(), watched[0].GetNamespace(), watched[0].GetName(),
+		)
+
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cachedWatch.GroupVersionKind()).To(Equal(watched[0].GroupVersionKind()))
+		Expect(cachedWatch.GetNamespace()).To(Equal(watched[0].GetNamespace()))
+		Expect(cachedWatch.GetName()).To(Equal(watched[0].GetName()))
+	})
+
+	It("Allows a non-conflicting List query batch", func() {
+		watcher := toObjectIdentifer(watched[1])
+
+		cm := corev1.ConfigMap{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "ConfigMap",
+				APIVersion: "v1",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "configmap-for-list",
+				Namespace: namespace,
+				Labels: map[string]string{
+					"watch": "me",
+				},
+			},
+		}
+
+		_, err := k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, &cm, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		DeferCleanup(func(dctx context.Context) {
+			err = k8sClient.CoreV1().ConfigMaps(namespace).Delete(dctx, cm.Name, metav1.DeleteOptions{})
+			if !k8serrors.IsNotFound(err) {
+				Expect(err).ToNot(HaveOccurred())
+			}
+		})
+
+		Expect(dynamicWatcher.StartQueryBatch(watcher)).ToNot(HaveOccurred())
+
+		lsReq, err := labels.ParseToRequirements("watch=me")
+		Expect(err).ToNot(HaveOccurred())
+		ls := labels.NewSelector().Add(lsReq...)
+
+		cachedObjects, err := dynamicWatcher.List(watcher, cm.GroupVersionKind(), namespace, ls)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cachedObjects).To(HaveLen(1))
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(3)))
+		Expect(cachedObjects[0].GroupVersionKind()).To(Equal(cm.GroupVersionKind()))
+		Expect(cachedObjects[0].GetNamespace()).To(Equal(cm.GetNamespace()))
+		Expect(cachedObjects[0].GetName()).To(Equal(cm.GetName()))
+	})
+
+	It("Updates the cache when the list query watch updates", func() {
+		watcher := toObjectIdentifer(watched[1])
+		cm2 := corev1.ConfigMap{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "ConfigMap",
+				APIVersion: "v1",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "configmap-for-list2",
+				Namespace: namespace,
+				Labels: map[string]string{
+					"watch": "me",
+				},
+			},
+		}
+
+		lsReq, err := labels.ParseToRequirements("watch=me")
+		Expect(err).ToNot(HaveOccurred())
+		ls := labels.NewSelector().Add(lsReq...)
+
+		// The cleanup from the last "It" should make this return nothing.
+		Eventually(func(g Gomega) {
+			cachedObjects, err := dynamicWatcher.List(watcher, cm2.GroupVersionKind(), namespace, ls)
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(cachedObjects).To(BeEmpty())
+		}, "10s").Should(Succeed())
+
+		_, err = k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, &cm2, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		Eventually(func(g Gomega) {
+			cachedObjects, err := dynamicWatcher.List(watcher, cm2.GroupVersionKind(), namespace, ls)
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(cachedObjects).To(HaveLen(1))
+			g.Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(3)))
+			g.Expect(cachedObjects[0].GroupVersionKind()).To(Equal(cm2.GroupVersionKind()))
+			g.Expect(cachedObjects[0].GetNamespace()).To(Equal(cm2.GetNamespace()))
+			g.Expect(cachedObjects[0].GetName()).To(Equal(cm2.GetName()))
+		}, "5s").Should(Succeed())
+	})
+
+	It("Returns the list from the cache", func() {
+		lsReq, err := labels.ParseToRequirements("watch=me")
+		Expect(err).ToNot(HaveOccurred())
+		ls := labels.NewSelector().Add(lsReq...)
+
+		gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
+
+		cachedObjects, err := dynamicWatcher.ListFromCache(gvk, namespace, ls)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cachedObjects).To(HaveLen(1))
+		Expect(cachedObjects[0].GroupVersionKind()).To(Equal(gvk))
+		Expect(cachedObjects[0].GetNamespace()).To(Equal(namespace))
+		Expect(cachedObjects[0].GetName()).To(Equal("configmap-for-list2"))
+	})
+
+	It("Allows the list query batch to end", func() {
+		DeferCleanup(func(dctx context.Context) {
+			err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(dctx, "configmap-for-list2", metav1.DeleteOptions{})
+			if !k8serrors.IsNotFound(err) {
+				Expect(err).ToNot(HaveOccurred())
+			}
+		})
+
+		watcher := toObjectIdentifer(watched[1])
+		Expect(dynamicWatcher.EndQueryBatch(watcher)).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(3)))
+
+		Expect(dynamicWatcher.RemoveWatcher(watcher)).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
+	})
+
+	It("Does not allow directly updating watches when a query batch is in progress", func() {
+		watched := toObjectIdentifer(watched[0])
+		Expect(dynamicWatcher.AddWatcher(watcherID, watched)).To(MatchError(ErrQueryBatchInProgress))
+		Expect(dynamicWatcher.AddOrUpdateWatcher(watcherID, watched)).To(MatchError(ErrQueryBatchInProgress))
+		Expect(dynamicWatcher.RemoveWatcher(watcherID)).To(MatchError(ErrQueryBatchInProgress))
+	})
+
+	It("Perform another get query", func() {
+		cachedObj2, err := dynamicWatcher.Get(
+			watcherID, watched[1].GroupVersionKind(), watched[1].GetNamespace(), watched[1].GetName(),
+		)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(cachedObj2.GroupVersionKind()).To(Equal(watched[1].GroupVersionKind()))
+		Expect(cachedObj2.GetNamespace()).To(Equal(watched[1].GetNamespace()))
+		Expect(cachedObj2.GetName()).To(Equal(watched[1].GetName()))
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(3)))
+	})
+
+	It("Allows the get query batch to end", func() {
+		Expect(dynamicWatcher.EndQueryBatch(watcherID)).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
 	})
 })
