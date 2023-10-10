@@ -32,6 +32,7 @@ linters:
     - cyclop
     - depguard
     - dupl
+    - dupword # false positive on the tested output for ExampleDynamicWatcher_Get
     - funlen
     - exhaustruct
     - exhaustivestruct

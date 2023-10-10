@@ -3,7 +3,6 @@ module github.com/stolostron/kubernetes-dependency-watches
 go 1.20
 
 require (
-	github.com/jellydator/ttlcache/v3 v3.0.1
 	github.com/onsi/ginkgo/v2 v2.9.1
 	github.com/onsi/gomega v1.27.4
 	k8s.io/api v0.26.1
@@ -54,7 +53,6 @@ require (
 	go.uber.org/zap v1.24.0 // indirect
 	golang.org/x/net v0.9.0 // indirect
 	golang.org/x/oauth2 v0.7.0 // indirect
-	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.7.0 // indirect
 	golang.org/x/term v0.7.0 // indirect
 	golang.org/x/text v0.9.0 // indirect

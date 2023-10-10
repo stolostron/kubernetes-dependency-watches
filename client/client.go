@@ -11,13 +11,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jellydator/ttlcache/v3"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiWatch "k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/watch"
@@ -28,9 +28,15 @@ import (
 )
 
 var (
-	ErrNotStarted          = errors.New("DynamicWatcher must be started to perform this action")
-	ErrInvalidInput        = errors.New("invalid input provided")
-	ErrNoVersionedResource = errors.New("the resource version was not found")
+	ErrNotStarted           = errors.New("DynamicWatcher must be started to perform this action")
+	ErrCacheDisabled        = errors.New("cannot perform this action because the cache is not enabled")
+	ErrInvalidInput         = errors.New("invalid input provided")
+	ErrNoVersionedResource  = errors.New("the resource version was not found")
+	ErrQueryBatchInProgress = errors.New(
+		"cannot perform this action; the query batch for this object ID is in progress",
+	)
+	ErrQueryBatchNotStarted = errors.New("the query batch for this object ID is not started")
+	ErrWatchStopping        = errors.New("the watched object has a watch being stopped")
 )
 
 type Reconciler interface {
@@ -46,6 +52,10 @@ type Options struct {
 	// Defaults to client-go's MaxOfRateLimiter which has both overall and per-item rate limiting. The overall is a
 	// token bucket and the per-item is exponential.
 	RateLimiter ratelimiter.RateLimiter
+	// EnableCache causes the watched objects to be cached and retrievable.
+	EnableCache bool
+	// Options for how long to cache GVK to GVR conversions.
+	ObjectCacheOptions ObjectCacheOptions
 }
 
 // ObjectIdentifier identifies an object from the Kubernetes API.
@@ -91,9 +101,15 @@ func (o ObjectIdentifier) Validate() error {
 	return nil
 }
 
+// GVK returns the GroupVersionKind of the ObjectIdentifier object.
+func (o ObjectIdentifier) GroupVersionKind() schema.GroupVersionKind {
+	return schema.GroupVersionKind{Group: o.Group, Version: o.Version, Kind: o.Kind}
+}
+
 // DynamicWatcher implementations enable a consumer to be notified of updates to Kubernetes objects that other
-// Kubernetes objects depend on.
-type DynamicWatcher interface {
+// Kubernetes objects depend on. It also provides a cache to retrieve the watched objects.
+type DynamicWatcher interface { //nolint: interfacebloat
+	AddWatcher(watcher ObjectIdentifier, watchedObject ObjectIdentifier) error
 	// AddOrUpdateWatcher updates the watches for the watcher. When updating, any previously watched objects not
 	// specified will stop being watched. If an error occurs, any created watches as part of this method execution will
 	// be removed.
@@ -106,6 +122,32 @@ type DynamicWatcher interface {
 	GetWatchCount() uint
 	// Started returns a channel that is closed when the DynamicWatcher is ready to receive watch requests.
 	Started() <-chan struct{}
+	// Get will add an additional watch to the started query batch and return the watched object. Note that you must
+	// call StartQueryBatch before calling this.
+	Get(
+		watcher ObjectIdentifier, gvk schema.GroupVersionKind, namespace string, name string,
+	) (*unstructured.Unstructured, error)
+	// GetFromCache will return the object from the cache. If it's not cached, the ErrNoCacheEntry error will be
+	// returned.
+	GetFromCache(gvk schema.GroupVersionKind, namespace string, name string) (*unstructured.Unstructured, error)
+	// List will add an additional watch to the started query batch and return the watched objects. Note that you must
+	// call StartQueryBatch before calling this.
+	List(
+		watcher ObjectIdentifier, gvk schema.GroupVersionKind, namespace string, selector labels.Selector,
+	) ([]unstructured.Unstructured, error)
+	// ListFromCache will return the objects from the cache. If it's not cached, the ErrNoCacheEntry error will be
+	// returned.
+	ListFromCache(
+		gvk schema.GroupVersionKind, namespace string, selector labels.Selector,
+	) ([]unstructured.Unstructured, error)
+	// ListWatchedFromCache will return all watched objects by the watcher in the cache.
+	ListWatchedFromCache(watcher ObjectIdentifier) ([]unstructured.Unstructured, error)
+	// StartQueryBatch will start a query batch transaction for the watcher. After a series of Get/List calls, calling
+	// EndQueryBatch will clean up the non-applicable preexisting watches made from before this query batch.
+	StartQueryBatch(watcher ObjectIdentifier) error
+	// EndQueryBatch will stop a query batch transaction for the watcher. This will clean up the non-applicable
+	// preexisting watches made from before this query batch.
+	EndQueryBatch(watcher ObjectIdentifier) error
 }
 
 // New returns an implemenetation of DynamicWatcher that is ready to be started with the Start method. An error is
@@ -120,55 +162,65 @@ func New(config *rest.Config, reconciler Reconciler, options *Options) (DynamicW
 		rateLimiter = workqueue.DefaultControllerRateLimiter()
 	}
 
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize a Kubernetes client: %w", err)
-	}
-
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize a dynamic Kubernetes client: %w", err)
 	}
 
-	gvkToGVRCache := ttlcache.New(
-		ttlcache.WithTTL[schema.GroupVersionKind, scopedGVR](10 * time.Minute),
-	)
-	// This will periodically delete expired cache items.
-	go gvkToGVRCache.Start()
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize a discovery Kubernetes client: %w", err)
+	}
 
 	watcher := dynamicWatcher{
-		client:            client,
 		dynamicClient:     dynamicClient,
-		gvkToGVR:          gvkToGVRCache,
+		queryBatches:      sync.Map{},
+		objectCache:       NewObjectCache(discoveryClient, options.ObjectCacheOptions),
+		options:           *options,
 		rateLimiter:       rateLimiter,
 		Reconciler:        reconciler,
 		startedChan:       make(chan struct{}),
 		watchedToWatchers: map[ObjectIdentifier]map[ObjectIdentifier]bool{},
 		watcherToWatches:  map[ObjectIdentifier]map[ObjectIdentifier]bool{},
-		watches:           map[ObjectIdentifier]apiWatch.Interface{},
+		watches:           map[ObjectIdentifier]*watchWithHandshake{},
 	}
 
 	return &watcher, nil
 }
 
-type scopedGVR struct {
+type queryBatch struct {
+	lock              *sync.RWMutex
+	previouslyWatched map[ObjectIdentifier]bool
+	// This can be updated with a read lock since this itself is concurrency safe.
+	newWatched *sync.Map
+	complete   bool
+}
+
+type ScopedGVR struct {
 	schema.GroupVersionResource
-	namespaced bool
+	Namespaced bool
+}
+
+type watchWithHandshake struct {
+	watch          apiWatch.Interface
+	requestingStop bool
+	stopped        chan ObjectIdentifier
 }
 
 // dynamicWatcher implements the DynamicWatcher interface.
 type dynamicWatcher struct {
 	// dynamicClient is a client-go dynamic client used for the dynamic watches.
 	dynamicClient dynamic.Interface
-	// client is a client-go client used for API discovery.
-	client kubernetes.Interface
-	lock   sync.RWMutex
-	Queue  workqueue.RateLimitingInterface
+	lock          sync.RWMutex
+	Queue         workqueue.RateLimitingInterface
 	Reconciler
 	rateLimiter ratelimiter.RateLimiter
-	// gvkToGVR is used as a cache of GVK to GVR mappings. The cache entries automatically expire every 10 minutes when
-	// using the New function.
-	gvkToGVR *ttlcache.Cache[schema.GroupVersionKind, scopedGVR]
+	objectCache ObjectCache
+	options     Options
+	// queryBatches is a sync.Map where the keys are watcher object identifiers and the values are queryBatch pointers.
+	// This gets created after a call to StartQueryBatch and gets removed when EndQueryBatch is called. This will
+	// keep track of the watches added in a batch from Get/List calls.
+	queryBatches sync.Map
 	// started gets set as part of the Start method.
 	started bool
 	// startedChan is closed when the dynamicWatcher is started. This is exposed to the user through the Started method.
@@ -181,7 +233,7 @@ type dynamicWatcher struct {
 	watcherToWatches map[ObjectIdentifier]map[ObjectIdentifier]bool
 	// watches is a map where the keys are ObjectIdentifier objects representing the watched objects and the values
 	// are objects representing the Kubernetes watch API requests.
-	watches map[ObjectIdentifier]apiWatch.Interface
+	watches map[ObjectIdentifier]*watchWithHandshake
 }
 
 // Start will start the dynamicWatcher and block until the input context is canceled.
@@ -205,20 +257,17 @@ func (d *dynamicWatcher) Start(ctx context.Context) error {
 	for d.processNextWorkItem(ctx) {
 	}
 
-	d.lock.Lock()
-
 	klog.V(2).Infof("Cleaning up the %d leftover watches", len(d.watches))
 
-	for _, watch := range d.watches {
-		watch.Stop()
+	for watcher := range d.watcherToWatches {
+		if err := d.RemoveWatcher(watcher); err != nil {
+			klog.Errorf("Failed to remove a watch for %s: %v", watcher, err)
+		}
 	}
 
-	d.watchedToWatchers = map[ObjectIdentifier]map[ObjectIdentifier]bool{}
-	d.watcherToWatches = map[ObjectIdentifier]map[ObjectIdentifier]bool{}
-	d.watches = map[ObjectIdentifier]apiWatch.Interface{}
+	d.lock.Lock()
 	d.startedChan = make(chan struct{})
 	d.started = false
-
 	d.lock.Unlock()
 
 	return nil
@@ -237,7 +286,7 @@ func (d *dynamicWatcher) relayWatchEvents(
 	watchedObject ObjectIdentifier,
 	resource dynamic.ResourceInterface,
 	watchedObjectExists bool,
-	events <-chan apiWatch.Event,
+	watch *watchWithHandshake,
 ) {
 	sendInitialEvent := watchedObjectExists
 
@@ -257,7 +306,7 @@ func (d *dynamicWatcher) relayWatchEvents(
 		}
 
 		// This for loop exits when the events channel closes, thus signaling that the RetryWatch stopped.
-		for event := range events {
+		for event := range watch.watch.ResultChan() {
 			// A watch error is usually from the watch request being explicitly stopped. This is why it's considered a
 			// debug log.
 			if event.Type == apiWatch.Error {
@@ -265,6 +314,10 @@ func (d *dynamicWatcher) relayWatchEvents(
 
 				continue
 			}
+
+			// This does not need a write lock to avoid a race condition because there is only ever one watch
+			// per object.
+			d.updateCacheFromWatchEvent(watchedObject, event)
 
 			d.lock.RLock()
 
@@ -276,13 +329,18 @@ func (d *dynamicWatcher) relayWatchEvents(
 		}
 
 		// The RetryWatch stopped, so figure out if this was intentional or due to an error.
-		d.lock.Lock()
-
-		// If the dynamicWatcher is unaware of the watch, then that means the watch stopping is intentional and the
-		// relay can end.
-		if _, ok := d.watches[watchedObject]; !ok {
+		if watch.requestingStop {
 			klog.V(2).Infof("A watch channel for the watcher %s was closed", watchedObject)
-			d.lock.Unlock()
+
+			if d.options.EnableCache {
+				// This does not need a write lock to avoid a race condition because there is only ever one watch
+				// per object and a new watch can't be added on this object until this is cleaned up.
+				d.objectCache.UncacheFromObjectIdentifier(watchedObject)
+			}
+
+			// Let the caller know that watch has cleaned up.
+			watch.stopped <- watchedObject
+			close(watch.stopped)
 
 			return
 		}
@@ -291,19 +349,101 @@ func (d *dynamicWatcher) relayWatchEvents(
 
 		w, _, err := watchLatest(watchedObject, resource)
 		if err != nil {
-			klog.Errorf("Could not restart a watch request for %s. Trying again. Error: %v", watchedObject, err)
-			d.lock.Unlock()
+			klog.Errorf(
+				"Could not restart a watch request for %s. Trying again in 5 seconds. Error: %v", watchedObject, err,
+			)
+			time.Sleep(5 * time.Second)
 
 			continue
 		}
 
-		d.watches[watchedObject] = w
+		d.lock.Lock()
+		// Use the new watch channel which will be used in the next iteration of the loop.
+		watch.watch = w
 		d.lock.Unlock()
 
-		// Use the new watch channel which will be used in the next iteration of the loop.
-		events = w.ResultChan()
 		// Send the initial event in case an action was lost between watch requests.
 		sendInitialEvent = true
+	}
+}
+
+// updateCacheFromWatchEvent will take a watch event and update the cache appropriately. This is meant to be called
+// from relayWatchEvent.
+func (d *dynamicWatcher) updateCacheFromWatchEvent(watchedObject ObjectIdentifier, watchEvent apiWatch.Event) {
+	if !d.options.EnableCache {
+		return
+	}
+
+	object, ok := watchEvent.Object.(*unstructured.Unstructured)
+	if !ok {
+		// No object returned from the watch
+		return
+	}
+
+	cachedObjects, err := d.objectCache.FromObjectIdentifier(watchedObject)
+	if err != nil && !errors.Is(err, ErrNoCacheEntry) {
+		klog.Errorf("Failed to cache the watched object %s for %s: %v", object, watchedObject, err)
+
+		return
+	}
+
+	switch eventType := (watchEvent.Type); eventType { //nolint: exhaustive
+	case apiWatch.Added, apiWatch.Modified:
+		updated := false
+
+		for i := range cachedObjects {
+			if cachedObjects[i].GroupVersionKind() != object.GroupVersionKind() {
+				continue
+			}
+
+			if cachedObjects[i].GetName() != object.GetName() {
+				continue
+			}
+
+			if cachedObjects[i].GetNamespace() != object.GetNamespace() {
+				continue
+			}
+
+			// The object was previously cached and needs to be updated
+			cachedObjects[i] = *object
+			updated = true
+
+			break
+		}
+
+		if !updated {
+			cachedObjects = append(cachedObjects, *object)
+		}
+
+		d.objectCache.CacheFromObjectIdentifier(watchedObject, cachedObjects)
+	case apiWatch.Deleted:
+		indexToRemove := -1
+
+		for i := range cachedObjects {
+			if cachedObjects[i].GroupVersionKind() != object.GroupVersionKind() {
+				continue
+			}
+
+			if cachedObjects[i].GetName() != object.GetName() {
+				continue
+			}
+
+			if cachedObjects[i].GetNamespace() != object.GetNamespace() {
+				continue
+			}
+
+			// The object was previously cached and needs to be deleted
+			indexToRemove = i
+
+			break
+		}
+
+		if indexToRemove != -1 {
+			// It's important to preserve the order here so that callers get deterministic results
+			cachedObjects = append(cachedObjects[:indexToRemove], cachedObjects[indexToRemove+1:]...)
+		}
+
+		d.objectCache.CacheFromObjectIdentifier(watchedObject, cachedObjects)
 	}
 }
 
@@ -378,98 +518,166 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 		}
 	}
 
+	_, loaded := d.queryBatches.Load(watcher)
+	if loaded {
+		return ErrQueryBatchInProgress
+	}
+
 	d.lock.Lock()
-	defer d.lock.Unlock()
+
+	existingWatches := make(map[ObjectIdentifier]bool, len(d.watcherToWatches[watcher]))
+
+	for key, val := range d.watcherToWatches[watcher] {
+		existingWatches[key] = val
+	}
 
 	watchedObjectsSet := make(map[ObjectIdentifier]bool, len(watchedObjects))
 
 	var encounteredErr error
 
-	watchesAdded := []ObjectIdentifier{}
-
-	for _, watchedObject := range watchedObjects {
-		gvr, err := d.gvrFromObjectIdentifier(watchedObject)
-		if err != nil {
-			klog.Errorf("Could not get the GVR for %s, error: %v", watchedObject, err)
-
-			encounteredErr = err
-
+	for i := range watchedObjects {
+		encounteredErr = d.addWatcher(watcher, &watchedObjects[i])
+		if encounteredErr != nil {
 			break
 		}
 
-		if !gvr.namespaced { // ignore namespaces set on cluster-scoped resources
-			watchedObject.Namespace = ""
-		}
-
-		// If the object was previously watched, do nothing.
-		if d.watcherToWatches[watcher][watchedObject] {
-			watchedObjectsSet[watchedObject] = true
-
-			continue
-		}
-
-		if len(d.watchedToWatchers[watchedObject]) == 0 {
-			d.watchedToWatchers[watchedObject] = map[ObjectIdentifier]bool{}
-		}
-
-		// If the object is also watched by another object, then do nothing.
-		if _, ok := d.watches[watchedObject]; ok {
-			watchedObjectsSet[watchedObject] = true
-			d.watchedToWatchers[watchedObject][watcher] = true
-
-			continue
-		}
-
-		var resource dynamic.ResourceInterface = d.dynamicClient.Resource(gvr.GroupVersionResource)
-		if watchedObject.Namespace != "" {
-			resource = resource.(dynamic.NamespaceableResourceInterface).Namespace(watchedObject.Namespace)
-		}
-
-		w, exists, err := watchLatest(watchedObject, resource)
-		if err != nil {
-			klog.Errorf("Could not start a watch request for %s, error: %v", watchedObject, err)
-
-			encounteredErr = err
-
-			break
-		}
-
-		d.watches[watchedObject] = w
-		d.watchedToWatchers[watchedObject][watcher] = true
-		watchedObjectsSet[watchedObject] = true
-
-		watchesAdded = append(watchesAdded, watchedObject)
-
-		// Launch a Go routine per watch API request that will feed d.Queue.
-		go d.relayWatchEvents(watchedObject, resource, exists, w.ResultChan())
+		watchedObjectsSet[watchedObjects[i]] = true
 	}
 
-	// If an error was encountered, remove the watches that were added to revert back to the previous state.
-	if encounteredErr != nil {
-		for _, addedWatch := range watchesAdded {
-			d.removeWatch(watcher, addedWatch)
+	stoppedWatches := []<-chan ObjectIdentifier{}
+
+	if encounteredErr == nil {
+		for existingWatchedObject := range existingWatches {
+			if watchedObjectsSet[existingWatchedObject] {
+				continue
+			}
+
+			stoppedWatches = append(stoppedWatches, d.removeWatch(watcher, existingWatchedObject))
 		}
 
-		return encounteredErr
-	}
-
-	for existingWatchedObject := range d.watcherToWatches[watcher] {
-		if watchedObjectsSet[existingWatchedObject] {
-			continue
+		d.watcherToWatches[watcher] = watchedObjectsSet
+	} else {
+		// If an error was encountered, remove the watches that were added to revert back to the previous state.
+		for _, watchedObject := range watchedObjects {
+			// watchedObjectsSet[watchedObject] is only set if an error wasn't encountered creating the watch.
+			// We can ignore the ones that failed or weren't processed.
+			if watchedObjectsSet[watchedObject] && !existingWatches[watchedObject] {
+				stoppedWatches = append(stoppedWatches, d.removeWatch(watcher, watchedObject))
+			}
 		}
 
-		d.removeWatch(watcher, existingWatchedObject)
+		if len(existingWatches) > 0 {
+			d.watcherToWatches[watcher] = existingWatches
+		} else {
+			delete(d.watcherToWatches, watcher)
+		}
 	}
 
-	d.watcherToWatches[watcher] = watchedObjectsSet
+	d.lock.Unlock()
+
+	d.waitForStoppedWatches(stoppedWatches)
+
+	return encounteredErr
+}
+
+// addWatcher will start a watch for the watcher. Note that it's expected that the lock is already
+// acquired by the caller.
+func (d *dynamicWatcher) addWatcher(watcher ObjectIdentifier, watchedObject *ObjectIdentifier) error {
+	if watch, ok := d.watches[*watchedObject]; ok && watch.requestingStop {
+		return ErrWatchStopping
+	}
+
+	gvr, err := d.objectCache.GVKToGVR(watchedObject.GroupVersionKind())
+	if err != nil {
+		klog.Errorf("Could not get the GVR for %s, error: %v", watchedObject, err)
+
+		return err
+	}
+
+	if !gvr.Namespaced { // ignore namespaces set on cluster-scoped resources
+		watchedObject.Namespace = ""
+	}
+
+	// If the object was previously watched, do nothing.
+	if d.watcherToWatches[watcher][*watchedObject] {
+		return nil
+	}
+
+	if len(d.watchedToWatchers[*watchedObject]) == 0 {
+		d.watchedToWatchers[*watchedObject] = map[ObjectIdentifier]bool{}
+	}
+
+	// If the object is also watched by another object, then do nothing.
+	if _, ok := d.watches[*watchedObject]; ok {
+		d.watchedToWatchers[*watchedObject][watcher] = true
+
+		return nil
+	}
+
+	var resource dynamic.ResourceInterface = d.dynamicClient.Resource(gvr.GroupVersionResource)
+	if watchedObject.Namespace != "" {
+		resource = resource.(dynamic.NamespaceableResourceInterface).Namespace(watchedObject.Namespace)
+	}
+
+	w, watchedObjects, err := watchLatest(*watchedObject, resource)
+	if err != nil {
+		klog.Errorf("Could not start a watch request for %s, error: %v", watchedObject, err)
+
+		return err
+	}
+
+	if d.options.EnableCache {
+		d.objectCache.CacheFromObjectIdentifier(*watchedObject, watchedObjects)
+	}
+
+	d.watches[*watchedObject] = &watchWithHandshake{watch: w, stopped: make(chan ObjectIdentifier)}
+	d.watchedToWatchers[*watchedObject][watcher] = true
+
+	if d.watcherToWatches[watcher] == nil {
+		d.watcherToWatches[watcher] = make(map[ObjectIdentifier]bool, 1)
+	}
+
+	d.watcherToWatches[watcher][*watchedObject] = true
+
+	// Launch a Go routine per watch API request that will feed d.Queue.
+	go d.relayWatchEvents(*watchedObject, resource, len(watchedObjects) != 0, d.watches[*watchedObject])
 
 	return nil
+}
+
+// AddWatcher adds a watch for the watcher.
+func (d *dynamicWatcher) AddWatcher(watcher ObjectIdentifier, watchedObject ObjectIdentifier) error {
+	if !d.started {
+		return ErrNotStarted
+	}
+
+	if err := watcher.Validate(); err != nil {
+		return err
+	}
+
+	if err := watchedObject.Validate(); err != nil {
+		return err
+	}
+
+	_, loaded := d.queryBatches.Load(watcher)
+	if loaded {
+		return ErrQueryBatchInProgress
+	}
+
+	d.lock.Lock()
+	defer d.lock.Unlock()
+
+	return d.addWatcher(watcher, &watchedObject)
 }
 
 // watchLatest performs a list with the field selector for the input watched object to get the resource version and then
 // starts the watch using the client-go RetryWatcher API. The returned bool indicates that the input watched object
 // exists on the cluster.
-func watchLatest(watchedObject ObjectIdentifier, resource dynamic.ResourceInterface) (apiWatch.Interface, bool, error) {
+func watchLatest(
+	watchedObject ObjectIdentifier, resource dynamic.ResourceInterface,
+) (
+	apiWatch.Interface, []unstructured.Unstructured, error,
+) {
 	timeout := int64(10)
 	listOpts := metav1.ListOptions{TimeoutSeconds: &timeout}
 
@@ -481,7 +689,7 @@ func watchLatest(watchedObject ObjectIdentifier, resource dynamic.ResourceInterf
 
 	listResult, err := resource.List(context.TODO(), listOpts)
 	if err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
 
 	resourceVersion := listResult.GetResourceVersion()
@@ -498,24 +706,28 @@ func watchLatest(watchedObject ObjectIdentifier, resource dynamic.ResourceInterf
 
 	w, err := watch.NewRetryWatcher(resourceVersion, &cache.ListWatch{WatchFunc: watchFunc})
 
-	return w, len(listResult.Items) != 0, err
+	return w, listResult.Items, err
 }
 
 // removeWatch will remove a reference to the input watched object. If the references on the watched object become 0,
 // the watch API request is stopped. Note that it's expected that the lock is already acquired by the caller.
-func (d *dynamicWatcher) removeWatch(watcher ObjectIdentifier, watchedObject ObjectIdentifier) {
+func (d *dynamicWatcher) removeWatch(watcher ObjectIdentifier, watchedObject ObjectIdentifier) <-chan ObjectIdentifier {
 	delete(d.watcherToWatches[watcher], watchedObject)
 	delete(d.watchedToWatchers[watchedObject], watcher)
 
 	// Stop the watch API request if the watcher was the only one watching this object.
 	if len(d.watchedToWatchers[watchedObject]) == 0 {
-		// Defer this so that the map is cleared before the watch is stopped to signal to relayWatchEvents that this
-		// is an intentional stop.
-		defer d.watches[watchedObject].Stop()
+		// Tell relayWatchEvents that this is an intentional stop
+		d.watches[watchedObject].requestingStop = true
+		d.watches[watchedObject].watch.Stop()
+		stoppedChan := d.watches[watchedObject].stopped
 
-		delete(d.watches, watchedObject)
 		delete(d.watchedToWatchers, watchedObject)
+
+		return stoppedChan
 	}
+
+	return nil
 }
 
 // RemoveWatcher removes a watcher and any of its API watches solely referenced by the watcher.
@@ -528,16 +740,42 @@ func (d *dynamicWatcher) RemoveWatcher(watcher ObjectIdentifier) error {
 		return err
 	}
 
+	_, loaded := d.queryBatches.Load(watcher)
+	if loaded {
+		return ErrQueryBatchInProgress
+	}
+
 	d.lock.Lock()
-	defer d.lock.Unlock()
+
+	stoppedWatches := []<-chan ObjectIdentifier{}
 
 	for watchedObject := range d.watcherToWatches[watcher] {
-		d.removeWatch(watcher, watchedObject)
+		stoppedWatches = append(stoppedWatches, d.removeWatch(watcher, watchedObject))
 	}
 
 	delete(d.watcherToWatches, watcher)
 
+	d.lock.Unlock()
+
+	d.waitForStoppedWatches(stoppedWatches)
+
 	return nil
+}
+
+// waitForStoppedWatches will take a slice of channels indicating when a watch has been completely stopped.
+// After the watch has stopped, it will cleanup the d.watches map. Note that the lock must be unlocked for this
+// method call.
+func (d *dynamicWatcher) waitForStoppedWatches(stoppedWatches []<-chan ObjectIdentifier) {
+	// Wait for all the watches to stop before returning
+	for i := range stoppedWatches {
+		if stoppedWatches[i] != nil {
+			watchedObject := <-stoppedWatches[i]
+
+			d.lock.Lock()
+			delete(d.watches, watchedObject)
+			d.lock.Unlock()
+		}
+	}
 }
 
 // GetWatchCount returns the total number of active API watch requests which can be used for metrics.
@@ -551,51 +789,252 @@ func (d *dynamicWatcher) GetWatchCount() uint {
 	return count
 }
 
-// gvrFromObjectIdentifier uses the discovery client to get the versioned resource and whether it is
-// namespaced. If the resource is not found or could not be retrieved, an error is always returned.
-func (d *dynamicWatcher) gvrFromObjectIdentifier(watchedObject ObjectIdentifier) (scopedGVR, error) {
-	gvk := schema.GroupVersionKind{
-		Group: watchedObject.Group, Version: watchedObject.Version, Kind: watchedObject.Kind,
+// StartQueryBatch will start a query batch transaction for the watcher. After a series of Get/List calls, calling
+// EndQueryBatch will clean up the non-applicable preexisting watches made from before this query batch.
+func (d *dynamicWatcher) StartQueryBatch(watcher ObjectIdentifier) error {
+	if !d.started {
+		return ErrNotStarted
 	}
 
-	// First check the cache
-	if cachedGVR := d.gvkToGVR.Get(gvk); cachedGVR != nil {
-		// Delete the cached item if it's expired
-		if cachedGVR.IsExpired() {
-			d.gvkToGVR.Delete(gvk)
-		} else {
-			return cachedGVR.Value(), nil
-		}
+	if !d.options.EnableCache {
+		return ErrCacheDisabled
 	}
 
-	rsrcList, err := d.client.Discovery().ServerResourcesForGroupVersion(gvk.GroupVersion().String())
+	if err := watcher.Validate(); err != nil {
+		return err
+	}
+
+	d.lock.RLock()
+
+	existingWatches := make(map[ObjectIdentifier]bool, len(d.watcherToWatches[watcher]))
+
+	for key := range d.watcherToWatches[watcher] {
+		existingWatches[key] = d.watcherToWatches[watcher][key]
+	}
+
+	d.lock.RUnlock()
+
+	obj := &queryBatch{
+		lock: &sync.RWMutex{}, previouslyWatched: existingWatches, newWatched: &sync.Map{},
+	}
+
+	_, loaded := d.queryBatches.LoadOrStore(watcher, obj)
+
+	// If it's already loaded, that means the query batch is already in progress. You cannot have multiple query
+	// batches for the same watcher.
+	if loaded {
+		return fmt.Errorf("%w: %s", ErrQueryBatchInProgress, watcher)
+	}
+
+	return nil
+}
+
+// fromCache will first query the cache for the watched object(s). If it's not present, a watch is started and the
+// method returns the object(s) once cached.
+func (d *dynamicWatcher) fromCache(
+	watcher ObjectIdentifier, watchedObjID ObjectIdentifier,
+) ([]unstructured.Unstructured, error) {
+	var batch *queryBatch
+
+	loadedBatch, loaded := d.queryBatches.Load(watcher)
+	if !loaded {
+		return nil, ErrQueryBatchNotStarted
+	}
+
+	// Type assertion checks aren't needed since this is the only type that is stored.
+	batch = loadedBatch.(*queryBatch)
+	// A read lock is indicating that the batch is still in progress and shouldn't end until the query completes.
+	// Because batch.newWatched is concurrency safe, it can be updated with a read lock on the batch.
+	batch.lock.RLock()
+	defer batch.lock.RUnlock()
+
+	// After the lock is obtained, ensure that the same batch is in progress. This is to account
+	// for another goroutine calling EndQueryBatch at the same time.
+	if batch.complete {
+		return nil, ErrQueryBatchNotStarted
+	}
+
+	batch.newWatched.Store(watchedObjID, nil)
+
+	watchedObjs, err := d.objectCache.FromObjectIdentifier(watchedObjID)
+	if err == nil {
+		return watchedObjs, nil
+	}
+
+	if !errors.Is(err, ErrNoCacheEntry) {
+		return nil, err
+	}
+
+	d.lock.Lock()
+	// Defer the unlock to prevent some other goroutine clearing the cache after the watch was added.
+	defer d.lock.Unlock()
+
+	// addWatcher is idempotent, so if another goroutine held the lock and started the watch for this object,
+	// it'll just be a no-op.
+	err = d.addWatcher(watcher, &watchedObjID)
 	if err != nil {
-		if k8serrors.IsNotFound(err) {
-			return scopedGVR{}, fmt.Errorf("%w: %s", ErrNoVersionedResource, gvk.String())
-		}
-
-		return scopedGVR{}, err
+		return nil, err
 	}
 
-	for _, rsrc := range rsrcList.APIResources {
-		if rsrc.Kind == gvk.Kind {
-			gvr := scopedGVR{
-				GroupVersionResource: schema.GroupVersionResource{
-					Group:    gvk.Group,
-					Version:  gvk.Version,
-					Resource: rsrc.Name,
-				},
-				namespaced: rsrc.Namespaced,
+	return d.objectCache.FromObjectIdentifier(watchedObjID)
+}
+
+// Get will add an additional watch to the started query batch and return the watched object. Note that you must
+// call StartQueryBatch before calling this.
+func (d *dynamicWatcher) Get(
+	watcher ObjectIdentifier, gvk schema.GroupVersionKind, namespace string, name string,
+) (*unstructured.Unstructured, error) {
+	if !d.started {
+		return nil, ErrNotStarted
+	}
+
+	if !d.options.EnableCache {
+		return nil, ErrCacheDisabled
+	}
+
+	watchedObjID := ObjectIdentifier{
+		Group:     gvk.Group,
+		Version:   gvk.Version,
+		Kind:      gvk.Kind,
+		Namespace: namespace,
+		Name:      name,
+	}
+
+	result, err := d.fromCache(watcher, watchedObjID)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(result) != 0 {
+		return &result[0], nil
+	}
+
+	return nil, nil
+}
+
+// GetFromCache will return the object from the cache. If it's not cached, the ErrNoCacheEntry error will be returned.
+func (d *dynamicWatcher) GetFromCache(
+	gvk schema.GroupVersionKind, namespace string, name string,
+) (*unstructured.Unstructured, error) {
+	if !d.options.EnableCache {
+		return nil, ErrCacheDisabled
+	}
+
+	return d.objectCache.Get(gvk, namespace, name)
+}
+
+// List will add an additional watch to the started query batch and return the watched objects. Note that you must
+// call StartQueryBatch before calling this.
+func (d *dynamicWatcher) List(
+	watcher ObjectIdentifier, gvk schema.GroupVersionKind, namespace string, selector labels.Selector,
+) ([]unstructured.Unstructured, error) {
+	if !d.started {
+		return nil, ErrNotStarted
+	}
+
+	if !d.options.EnableCache {
+		return nil, ErrCacheDisabled
+	}
+
+	if selector == nil {
+		selector = labels.NewSelector()
+	}
+
+	watchedObjID := ObjectIdentifier{
+		Group:     gvk.Group,
+		Version:   gvk.Version,
+		Kind:      gvk.Kind,
+		Namespace: namespace,
+		Selector:  selector.String(),
+	}
+
+	return d.fromCache(watcher, watchedObjID)
+}
+
+// ListFromCache will return the objects from the cache. If it's not cached, the ErrNoCacheEntry error will be
+// returned.
+func (d *dynamicWatcher) ListFromCache(
+	gvk schema.GroupVersionKind, namespace string, selector labels.Selector,
+) ([]unstructured.Unstructured, error) {
+	if !d.options.EnableCache {
+		return nil, ErrCacheDisabled
+	}
+
+	return d.objectCache.List(gvk, namespace, selector)
+}
+
+// ListWatchedFromCache will return all watched objects by the watcher in the cache.
+func (d *dynamicWatcher) ListWatchedFromCache(watcher ObjectIdentifier) ([]unstructured.Unstructured, error) {
+	if !d.options.EnableCache {
+		return nil, ErrCacheDisabled
+	}
+
+	d.lock.RLock()
+	defer d.lock.RUnlock()
+
+	rv := make([]unstructured.Unstructured, 0, len(d.watcherToWatches[watcher]))
+
+	for watched := range d.watcherToWatches[watcher] {
+		cachedList, err := d.objectCache.FromObjectIdentifier(watched)
+		if err != nil {
+			if errors.Is(err, ErrNoCacheEntry) {
+				continue
 			}
 
-			// Cache the value
-			d.gvkToGVR.Set(gvk, gvr, ttlcache.DefaultTTL)
-
-			return gvr, nil
+			return nil, err
 		}
+
+		rv = append(rv, cachedList...)
 	}
 
-	return scopedGVR{}, fmt.Errorf(
-		"%w: no matching kind was found: %s", ErrNoVersionedResource, gvk.String(),
-	)
+	return rv, nil
+}
+
+// EndQueryBatch will stop a query batch transaction for the watcher. This will clean up the non-applicable
+// preexisting watches made from before this query batch.
+func (d *dynamicWatcher) EndQueryBatch(watcher ObjectIdentifier) error {
+	if !d.started {
+		return ErrNotStarted
+	}
+
+	if !d.options.EnableCache {
+		return ErrCacheDisabled
+	}
+
+	if err := watcher.Validate(); err != nil {
+		return err
+	}
+
+	loadedObj, loaded := d.queryBatches.Load(watcher)
+
+	if !loaded {
+		return ErrQueryBatchNotStarted
+	}
+
+	batch := loadedObj.(*queryBatch)
+	batch.lock.Lock()
+
+	defer batch.lock.Unlock()
+
+	if len(batch.previouslyWatched) != 0 {
+		// Only lock if previouslyWatched has any values
+		d.lock.Lock()
+		stoppedWatches := []<-chan ObjectIdentifier{}
+
+		for watchedObject := range batch.previouslyWatched {
+			if _, watched := batch.newWatched.Load(watchedObject); !watched {
+				stoppedWatches = append(stoppedWatches, d.removeWatch(watcher, watchedObject))
+			}
+		}
+
+		d.lock.Unlock()
+
+		d.waitForStoppedWatches(stoppedWatches)
+	}
+
+	batch.complete = true
+
+	d.queryBatches.Delete(watcher)
+
+	return nil
 }

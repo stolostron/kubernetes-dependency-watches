@@ -12,7 +12,7 @@ export GOPATH ?= $(GOPATH_DEFAULT)
 GOBIN_DEFAULT := $(GOPATH)/bin
 export GOBIN ?= $(GOBIN_DEFAULT)
 export PATH := $(LOCAL_BIN):$(GOBIN):$(PATH)
-TESTARGS_DEFAULT := "-v"
+TESTARGS_DEFAULT := -v
 export TESTARGS ?= $(TESTARGS_DEFAULT)
 
 include build/common/Makefile.common.mk
