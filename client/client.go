@@ -54,6 +54,9 @@ type Options struct {
 	RateLimiter ratelimiter.RateLimiter
 	// EnableCache causes the watched objects to be cached and retrievable.
 	EnableCache bool
+	// DisableInitialReconcile causes the initial reconcile from the list request before the watch to not cause a
+	// reconcile. This is useful if you are exclusively using the caching query API.
+	DisableInitialReconcile bool
 	// Options for how long to cache GVK to GVR conversions.
 	ObjectCacheOptions ObjectCacheOptions
 }
@@ -285,11 +288,9 @@ func (d *dynamicWatcher) Started() <-chan struct{} {
 func (d *dynamicWatcher) relayWatchEvents(
 	watchedObject ObjectIdentifier,
 	resource dynamic.ResourceInterface,
-	watchedObjectExists bool,
+	sendInitialEvent bool,
 	watch *watchWithHandshake,
 ) {
-	sendInitialEvent := watchedObjectExists
-
 	for {
 		// Send an initial event when the watch is started and the object exists to replicate the list and watch
 		// behavior of controller-runtime. A watch restart can also trigger this to account for a lost event.
@@ -639,8 +640,10 @@ func (d *dynamicWatcher) addWatcher(watcher ObjectIdentifier, watchedObject *Obj
 
 	d.watcherToWatches[watcher][*watchedObject] = true
 
+	sendInitialEvent := !d.options.DisableInitialReconcile && len(watchedObjects) != 0
+
 	// Launch a Go routine per watch API request that will feed d.Queue.
-	go d.relayWatchEvents(*watchedObject, resource, len(watchedObjects) != 0, d.watches[*watchedObject])
+	go d.relayWatchEvents(*watchedObject, resource, sendInitialEvent, d.watches[*watchedObject])
 
 	return nil
 }
