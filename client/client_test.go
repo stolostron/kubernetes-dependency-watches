@@ -328,6 +328,73 @@ var _ = Describe("Test the client", Ordered, func() {
 	})
 })
 
+var _ = Describe("Test the client with the initial reconcile is disabled", Ordered, func() {
+	var (
+		ctxTest        context.Context
+		dynamicWatcher DynamicWatcher
+		reconcilerObj  *reconciler
+		watched        []k8sObject
+		watchedObjIDs  []ObjectIdentifier
+		watcher        *corev1.ConfigMap
+	)
+
+	BeforeAll(func() {
+		var cancelCtxTest context.CancelFunc
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+
+		DeferCleanup(func() { cancelCtxTest() })
+
+		reconcilerObj = &reconciler{
+			ResultsChan: make(chan ObjectIdentifier, 20),
+		}
+		watcher, watched, dynamicWatcher = getDynamicWatcher(
+			ctxTest, reconcilerObj, &Options{DisableInitialReconcile: true},
+		)
+
+		watchedObjIDs = []ObjectIdentifier{}
+		for _, watchedObj := range watched {
+			id := toObjectIdentifer(watchedObj)
+			id.Namespace = namespace // ensure namespace is set, even (possibly "incorrectly") on cluster-scoped objects
+			watchedObjIDs = append(watchedObjIDs, id)
+		}
+
+		go func() {
+			defer GinkgoRecover()
+
+			err := dynamicWatcher.Start(ctxTest)
+			Expect(err).ToNot(HaveOccurred())
+		}()
+
+		<-dynamicWatcher.Started()
+	})
+
+	AfterEach(func() {
+		// Drain the test results channel.
+		for len(reconcilerObj.ResultsChan) != 0 {
+			_, ok := <-reconcilerObj.ResultsChan
+			Expect(ok).To(BeTrue())
+		}
+	})
+
+	It("Adds watches", func() {
+		By("Adding the watcher with a single watched object")
+		err := dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), watchedObjIDs[0])
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Checking that the reconciler was called during the initial list")
+		Consistently(reconcilerObj.ResultsChan, "5s").Should(HaveLen(0))
+
+		By("Updating the watched object")
+		watchedSecret := watched[0].(*corev1.Secret)
+		watchedSecret.Labels = map[string]string{"trigger": "reconcile"}
+		_, err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watchedSecret, metav1.UpdateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Checking that the reconciler was called during the initial list")
+		Eventually(reconcilerObj.ResultsChan, "5s").Should(HaveLen(1))
+	})
+})
+
 var _ = Describe("Test the client clean up", Ordered, func() {
 	var (
 		watcherID      ObjectIdentifier

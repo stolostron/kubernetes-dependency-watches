@@ -22,7 +22,10 @@ import (
 
 type reconciler struct{}
 
-func (r *reconciler) Reconcile(_ context.Context, _ client.ObjectIdentifier) (reconcile.Result, error) {
+func (r *reconciler) Reconcile(_ context.Context, watcher client.ObjectIdentifier) (reconcile.Result, error) {
+	//nolint: forbidigo
+	fmt.Printf("An object that this object (%s) was watching was updated\n", watcher)
+
 	return reconcile.Result{}, nil
 }
 
@@ -271,7 +274,9 @@ func ExampleDynamicWatcher_Get() { //nolint: nosnakecase
 	}()
 
 	// Create the dynamic watcher with the cache enabled.
-	dynamicWatcher, err := client.New(k8sConfig, &reconciler{}, &client.Options{EnableCache: true})
+	dynamicWatcher, err := client.New(
+		k8sConfig, &reconciler{}, &client.Options{DisableInitialReconcile: true, EnableCache: true},
+	)
 	if err != nil {
 		panic(err)
 	}
