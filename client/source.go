@@ -43,7 +43,7 @@ func (t *ControllerRuntimeSourceReconciler) Reconcile(
 ) {
 	watcherObj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": watcher.Group + "/" + watcher.Version,
+			"apiVersion": watcher.GroupVersionKind().GroupVersion().String(),
 			"kind":       watcher.Kind,
 			"metadata": map[string]interface{}{
 				"name":      watcher.Name,
