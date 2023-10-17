@@ -151,6 +151,9 @@ type DynamicWatcher interface { //nolint: interfacebloat
 	// EndQueryBatch will stop a query batch transaction for the watcher. This will clean up the non-applicable
 	// preexisting watches made from before this query batch.
 	EndQueryBatch(watcher ObjectIdentifier) error
+	// GVKToGVR will convert a GVK to a GVR and cache the result for a default of 10 minutes (configurable) when found,
+	// and not cache failed conversions by default (configurable).
+	GVKToGVR(gvk schema.GroupVersionKind) (ScopedGVR, error)
 }
 
 // New returns an implemenetation of DynamicWatcher that is ready to be started with the Start method. An error is
@@ -1040,4 +1043,10 @@ func (d *dynamicWatcher) EndQueryBatch(watcher ObjectIdentifier) error {
 	d.queryBatches.Delete(watcher)
 
 	return nil
+}
+
+// GVKToGVR will convert a GVK to a GVR and cache the result for a default of 10 minutes (configurable) when found, and
+// not cache failed conversions by default (configurable).
+func (d *dynamicWatcher) GVKToGVR(gvk schema.GroupVersionKind) (ScopedGVR, error) {
+	return d.objectCache.GVKToGVR(gvk)
 }
