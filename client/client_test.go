@@ -1236,4 +1236,11 @@ var _ = Describe("Test the client query API", Ordered, func() {
 		Expect(dynamicWatcher.EndQueryBatch(watcherID)).ToNot(HaveOccurred())
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
 	})
+
+	It("Allows a GVK to GVR conversion using the object cache", func() {
+		gvr, err := dynamicWatcher.GVKToGVR(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(gvr.Namespaced).To(BeTrue())
+		Expect(gvr.Resource).To(Equal("configmaps"))
+	})
 })
