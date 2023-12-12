@@ -602,6 +602,10 @@ func (d *dynamicWatcher) addWatcher(watcher ObjectIdentifier, watchedObject *Obj
 		watchedObject.Namespace = ""
 	}
 
+	if d.watcherToWatches[watcher] == nil {
+		d.watcherToWatches[watcher] = map[ObjectIdentifier]bool{}
+	}
+
 	// If the object was previously watched, do nothing.
 	if d.watcherToWatches[watcher][*watchedObject] {
 		return nil
@@ -614,6 +618,7 @@ func (d *dynamicWatcher) addWatcher(watcher ObjectIdentifier, watchedObject *Obj
 	// If the object is also watched by another object, then do nothing.
 	if _, ok := d.watches[*watchedObject]; ok {
 		d.watchedToWatchers[*watchedObject][watcher] = true
+		d.watcherToWatches[watcher][*watchedObject] = true
 
 		return nil
 	}
@@ -636,11 +641,6 @@ func (d *dynamicWatcher) addWatcher(watcher ObjectIdentifier, watchedObject *Obj
 
 	d.watches[*watchedObject] = &watchWithHandshake{watch: w, stopped: make(chan ObjectIdentifier)}
 	d.watchedToWatchers[*watchedObject][watcher] = true
-
-	if d.watcherToWatches[watcher] == nil {
-		d.watcherToWatches[watcher] = make(map[ObjectIdentifier]bool, 1)
-	}
-
 	d.watcherToWatches[watcher][*watchedObject] = true
 
 	sendInitialEvent := !d.options.DisableInitialReconcile && len(watchedObjects) != 0
@@ -862,22 +862,24 @@ func (d *dynamicWatcher) fromCache(
 
 	batch.newWatched.Store(watchedObjID, nil)
 
-	watchedObjs, err := d.objectCache.FromObjectIdentifier(watchedObjID)
-	if err == nil {
-		return watchedObjs, nil
+	d.lock.RLock()
+	// If the watch already exists for this watcher, just return from the cache.
+	if d.watcherToWatches[watcher][watchedObjID] {
+		defer d.lock.RUnlock()
+
+		return d.objectCache.FromObjectIdentifier(watchedObjID)
 	}
 
-	if !errors.Is(err, ErrNoCacheEntry) {
-		return nil, err
-	}
+	d.lock.RUnlock()
 
+	// A write lock is needed since this a new watch for this watcher.
 	d.lock.Lock()
 	// Defer the unlock to prevent some other goroutine clearing the cache after the watch was added.
 	defer d.lock.Unlock()
 
 	// addWatcher is idempotent, so if another goroutine held the lock and started the watch for this object,
 	// it'll just be a no-op.
-	err = d.addWatcher(watcher, &watchedObjID)
+	err := d.addWatcher(watcher, &watchedObjID)
 	if err != nil {
 		return nil, err
 	}

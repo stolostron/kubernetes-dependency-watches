@@ -1237,6 +1237,46 @@ var _ = Describe("Test the client query API", Ordered, func() {
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
 	})
 
+	It("Cleans up the watches for an empty query batch", func() {
+		Expect(dynamicWatcher.StartQueryBatch(watcherID)).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.EndQueryBatch(watcherID)).ToNot(HaveOccurred())
+
+		listWatcher := toObjectIdentifer(watched[1])
+		Expect(dynamicWatcher.StartQueryBatch(listWatcher)).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.EndQueryBatch(listWatcher)).ToNot(HaveOccurred())
+
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(0)))
+	})
+
+	It("Ensures watch references are correct for two watchers on same object", func() {
+		Expect(dynamicWatcher.StartQueryBatch(watcherID)).ToNot(HaveOccurred())
+		_, err := dynamicWatcher.Get(
+			watcherID, watched[0].GroupVersionKind(), watched[0].GetNamespace(), watched[0].GetName(),
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.EndQueryBatch(watcherID)).ToNot(HaveOccurred())
+
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(1)))
+
+		otherWatcher := toObjectIdentifer(watched[1])
+		Expect(dynamicWatcher.StartQueryBatch(otherWatcher)).ToNot(HaveOccurred())
+		_, err = dynamicWatcher.Get(
+			otherWatcher, watched[0].GroupVersionKind(), watched[0].GetNamespace(), watched[0].GetName(),
+		)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.EndQueryBatch(otherWatcher)).ToNot(HaveOccurred())
+
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(1)))
+
+		// Removing the original watcher should not remove the watch reference.
+		Expect(dynamicWatcher.RemoveWatcher(watcherID)).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(1)))
+
+		// Removing the last watcher should remove the watch.
+		Expect(dynamicWatcher.RemoveWatcher(otherWatcher)).ToNot(HaveOccurred())
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(0)))
+	})
+
 	It("Allows a GVK to GVR conversion using the object cache", func() {
 		gvr, err := dynamicWatcher.GVKToGVR(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"})
 		Expect(err).ToNot(HaveOccurred())
