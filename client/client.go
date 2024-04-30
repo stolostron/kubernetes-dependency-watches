@@ -57,7 +57,8 @@ type Options struct {
 	// DisableInitialReconcile causes the initial reconcile from the list request before the watch to not cause a
 	// reconcile. This is useful if you are exclusively using the caching query API.
 	DisableInitialReconcile bool
-	// Options for how long to cache GVK to GVR conversions.
+	// Options for how long to cache GVK to GVR conversions, and whether to disable the DeepCopy when retrieving items
+	// from the cache.
 	ObjectCacheOptions ObjectCacheOptions
 }
 
