@@ -75,6 +75,9 @@ type ObjectCacheOptions struct {
 	// The time for a failed GVK to GVR conversion to not be retried. The default behavior is to not cache failures.
 	// Setting this can be useful if you don't want to continuously query the Kubernetes API if a CRD is missing.
 	MissingAPIResourceCacheTTL time.Duration
+	// Whether to *skip* the DeepCopy when retrieving an object from the cache.
+	// Be careful when disabling deep copy: it makes it possible to mutate objects inside the cache.
+	UnsafeDisableDeepCopy bool
 }
 
 // NewObjectCache will create an object cache with the input discovery client.
@@ -164,7 +167,16 @@ func (o *objectCache) FromObjectIdentifier(objID ObjectIdentifier) ([]unstructur
 	}
 
 	// Type assertion checks aren't needed since this is the only method that stores data.
-	result := loadedResult.([]unstructured.Unstructured)
+	uncopiedResult := loadedResult.([]unstructured.Unstructured)
+
+	if o.options.UnsafeDisableDeepCopy {
+		return uncopiedResult, nil
+	}
+
+	result := make([]unstructured.Unstructured, 0, len(uncopiedResult))
+	for _, obj := range uncopiedResult {
+		result = append(result, *obj.DeepCopy())
+	}
 
 	return result, nil
 }

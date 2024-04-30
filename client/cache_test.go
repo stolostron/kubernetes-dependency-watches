@@ -143,3 +143,55 @@ var _ = Describe("Test the cache", Ordered, func() {
 		Expect(cachedObject).To(BeNil())
 	})
 })
+
+var _ = Describe("Test the UnsafeDisableDeepCopy option of the cache", func() {
+	var discoveryClient *discovery.DiscoveryClient
+	configMapGVK := schema.GroupVersionKind{
+		Version: "v1",
+		Kind:    "ConfigMap",
+	}
+
+	BeforeEach(func() {
+		var err error
+		discoveryClient, err = discovery.NewDiscoveryClientForConfig(k8sConfig)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("Defaults to DeepCopy, preventing mutations", func() {
+		cache := NewObjectCache(discoveryClient, ObjectCacheOptions{})
+
+		object := unstructured.Unstructured{}
+		object.SetName("cached-object1")
+		object.SetLabels(map[string]string{"mylabel": "one"})
+		cache.CacheObject(configMapGVK, "default", "cached-object1", &object)
+
+		cachedObject1, err := cache.Get(configMapGVK, "default", "cached-object1")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cachedObject1.GetLabels()).To(HaveKeyWithValue("mylabel", "one"))
+
+		cachedObject1.SetLabels(map[string]string{"mylabel": "two"})
+
+		cachedObject2, err := cache.Get(configMapGVK, "default", "cached-object1")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cachedObject2.GetLabels()).To(HaveKeyWithValue("mylabel", "one"))
+	})
+
+	It("Can be set to disable the DeepCopy, allowing mutations", func() {
+		cache := NewObjectCache(discoveryClient, ObjectCacheOptions{UnsafeDisableDeepCopy: true})
+
+		object := &unstructured.Unstructured{}
+		object.SetName("cached-object1")
+		object.SetLabels(map[string]string{"mylabel": "one"})
+		cache.CacheObject(configMapGVK, "default", "cached-object1", object)
+
+		cachedObject1, err := cache.Get(configMapGVK, "default", "cached-object1")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cachedObject1.GetLabels()).To(HaveKeyWithValue("mylabel", "one"))
+
+		cachedObject1.SetLabels(map[string]string{"mylabel": "two"})
+
+		cachedObject2, err := cache.Get(configMapGVK, "default", "cached-object1")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(cachedObject2.GetLabels()).To(HaveKeyWithValue("mylabel", "two"))
+	})
+})
