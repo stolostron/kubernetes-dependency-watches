@@ -87,6 +87,7 @@ func NewObjectCache(discoveryClient *discovery.DiscoveryClient, options ObjectCa
 		cache:           &sync.Map{},
 		gvkToGVRCache:   &sync.Map{},
 		discoveryClient: discoveryClient,
+		options:         options,
 	}
 }
 
