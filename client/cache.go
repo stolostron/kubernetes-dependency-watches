@@ -196,8 +196,17 @@ func (o *objectCache) CacheObject(
 	o.CacheFromObjectIdentifier(objID, []unstructured.Unstructured{*object})
 }
 
-// CacheFromObjectIdentifier will cache a list of objects for the input object identifier.
+// CacheFromObjectIdentifier will cache a list of objects for the input object identifier. The metadata.managedFields
+// and metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] values are automatically removed to
+// save on memory.
 func (o *objectCache) CacheFromObjectIdentifier(objID ObjectIdentifier, objects []unstructured.Unstructured) {
+	for i := range objects {
+		unstructured.RemoveNestedField(objects[i].Object, "metadata", "managedFields")
+		unstructured.RemoveNestedField(
+			objects[i].Object, "metadata", "annotations", "kubectl.kubernetes.io/last-applied-configuration",
+		)
+	}
+
 	o.cache.Store(objID, objects)
 }
 
