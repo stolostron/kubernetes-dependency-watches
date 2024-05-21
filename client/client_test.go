@@ -1023,6 +1023,8 @@ var _ = Describe("Test the client query API", Ordered, func() {
 		)
 		Expect(err).ToNot(HaveOccurred())
 
+		Expect(cachedObj1.GetManagedFields()).To(BeEmpty())
+		Expect(cachedObj1.GetAnnotations()["kubectl.kubernetes.io/last-applied-configuration"]).To(BeEmpty())
 		Expect(cachedObj1.GroupVersionKind()).To(Equal(watched[0].GroupVersionKind()))
 		Expect(cachedObj1.GetNamespace()).To(Equal(watched[0].GetNamespace()))
 		Expect(cachedObj1.GetName()).To(Equal(watched[0].GetName()))
