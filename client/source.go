@@ -15,9 +15,9 @@ import (
 const defaultBufferSize = 1024
 
 // NewControllerRuntimeSource returns a reconciler for DynamicWatcher that sends events to a controller-runtime
-// source.Channel. This source.Channel can be used in the controller-runtime builder.Builder.Watches method. This
-// source.Channel will only send event.GenericEvent typed events, so any handlers specified in the
-// builder.Builder.Watches method will need to handle that.
+// source.Channel. This source.Channel can be used in the controller-runtime builder.Builder.WatchesRawSource method.
+// This source.Channel will only send event.GenericEvent typed events, so any handlers specified in the
+// builder.Builder.WatchesRawSource method will need to handle that.
 func NewControllerRuntimeSource() (*ControllerRuntimeSourceReconciler, *source.Channel) {
 	eventChan := make(chan event.GenericEvent, defaultBufferSize)
 	sourceChan := &source.Channel{

@@ -13,8 +13,10 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/stolostron/kubernetes-dependency-watches/client"
@@ -178,9 +180,15 @@ func ExampleNewControllerRuntimeSource() {
 
 	// Create a controller-runtime manager and register a simple controller.
 	options := ctrl.Options{
-		Namespace:              "default",
-		Scheme:                 scheme.Scheme,
-		MetricsBindAddress:     "0",
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				"default": {},
+			},
+		},
+		Scheme: scheme.Scheme,
+		Metrics: server.Options{
+			BindAddress: "0",
+		},
 		HealthProbeBindAddress: "0",
 		LeaderElection:         false,
 	}
@@ -194,7 +202,7 @@ func ExampleNewControllerRuntimeSource() {
 	// object is updated.
 	err = ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.ConfigMap{}).
-		Watches(sourceChan, &handler.EnqueueRequestForObject{}).
+		WatchesRawSource(sourceChan, &handler.EnqueueRequestForObject{}).
 		Complete(&ctrlRuntimeReconciler{})
 
 	if err != nil {
