@@ -12,7 +12,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -61,9 +63,15 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 		<-dynamicWatcher.Started()
 
 		options := ctrl.Options{
-			Namespace:              namespace,
-			Scheme:                 scheme.Scheme,
-			MetricsBindAddress:     "0",
+			Cache: cache.Options{
+				DefaultNamespaces: map[string]cache.Config{
+					namespace: {},
+				},
+			},
+			Scheme: scheme.Scheme,
+			Metrics: server.Options{
+				BindAddress: "0",
+			},
 			HealthProbeBindAddress: "0",
 			LeaderElection:         false,
 		}
@@ -72,7 +80,7 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 
 		err = ctrl.NewControllerManagedBy(mgr).
 			For(&corev1.ConfigMap{}).
-			Watches(sourceChan, &handler.EnqueueRequestForObject{}).
+			WatchesRawSource(sourceChan, &handler.EnqueueRequestForObject{}).
 			Complete(&ctrlRuntimeReconciler)
 		Expect(err).ToNot(HaveOccurred())
 
