@@ -352,7 +352,7 @@ func (d *dynamicWatcher) relayWatchEvents(
 
 		klog.V(1).Infof("Restarting the watch request for %s", watchedObject)
 
-		w, _, err := watchLatest(watchedObject, resource)
+		w, watchedObjects, err := watchLatest(watchedObject, resource)
 		if err != nil {
 			klog.Errorf(
 				"Could not restart a watch request for %s. Trying again in 5 seconds. Error: %v", watchedObject, err,
@@ -360,6 +360,10 @@ func (d *dynamicWatcher) relayWatchEvents(
 			time.Sleep(5 * time.Second)
 
 			continue
+		}
+
+		if d.options.EnableCache {
+			d.objectCache.CacheFromObjectIdentifier(watchedObject, watchedObjects)
 		}
 
 		d.lock.Lock()
