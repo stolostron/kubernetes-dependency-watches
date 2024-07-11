@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -74,8 +75,16 @@ type ObjectIdentifier struct {
 
 // String will convert the ObjectIdentifer to a string in a similar format to apimachinery's schema.GroupVersionKind.
 func (o ObjectIdentifier) String() string {
-	return fmt.Sprintf("%v/%v, Kind=%v, Namespace=%v, Name=%v, Selector=%v",
-		o.Group, o.Version, o.Kind, o.Namespace, o.Name, o.Selector)
+	s := fmt.Sprintf(
+		"GroupVersion=%v, Kind=%v, Namespace=%v, Name=%v",
+		o.GroupVersionKind().GroupVersion(), o.Kind, o.Namespace, o.Name,
+	)
+
+	if o.Selector != "" {
+		return s + ", Selector=" + o.Selector
+	}
+
+	return s
 }
 
 // Validate will return a wrapped ErrInvalidInput error when a required field is not set on the ObjectIdentifier.
@@ -288,7 +297,10 @@ func (d *dynamicWatcher) Started() <-chan struct{} {
 // relayWatchEvents will watch a channel tied to a Kubernetes API watch and then relay changes to the dynamicWatcher
 // queue. If the watch stops unintentionally after retries from the client-go RetryWatcher, it will be restarted at the
 // latest resourceVersion. This usually happens if the retry watcher tries to start watching again at a resource version
-// that is no longer in etcd.
+// that is no longer in etcd. Note that if the RetryWatcher stops, is retried, and the client is forbidden to restart
+// the watch, the watch is cleaned up and each watcher will get added to the dynamicWatcher queue. Note that if
+// RetryWatcher retries the watch without stopping, it'll keep retrying if it encounters an issue where it is
+// forbidden. The proposed fix is in https://github.com/kubernetes/kubernetes/pull/126038.
 func (d *dynamicWatcher) relayWatchEvents(
 	watchedObject ObjectIdentifier,
 	resource dynamic.ResourceInterface,
@@ -354,6 +366,32 @@ func (d *dynamicWatcher) relayWatchEvents(
 
 		w, watchedObjects, err := watchLatest(watchedObject, resource)
 		if err != nil {
+			if k8serrors.IsForbidden(err) {
+				klog.Errorf(
+					"Could not restart a watch request due to the client no longer having access. "+
+						"Cleaning up and starting reconciles for the watchers. Error: %v",
+					err,
+				)
+
+				d.lock.Lock()
+				defer d.lock.Unlock()
+
+				for watcher := range d.watchedToWatchers[watchedObject] {
+					delete(d.watcherToWatches[watcher], watchedObject)
+					delete(d.watchedToWatchers[watchedObject], watcher)
+
+					d.Queue.Add(watcher)
+				}
+
+				delete(d.watches, watchedObject)
+
+				if d.options.EnableCache {
+					d.objectCache.UncacheFromObjectIdentifier(watchedObject)
+				}
+
+				return
+			}
+
 			klog.Errorf(
 				"Could not restart a watch request for %s. Trying again in 5 seconds. Error: %v", watchedObject, err,
 			)
@@ -635,6 +673,13 @@ func (d *dynamicWatcher) addWatcher(watcher ObjectIdentifier, watchedObject *Obj
 
 	w, watchedObjects, err := watchLatest(*watchedObject, resource)
 	if err != nil {
+		if k8serrors.IsForbidden(err) {
+			// When the user is forbidden to perform the watch, the original error is just "unknown".
+			err = fmt.Errorf(
+				"%w: ensure the client has the list and watch permissions for the query: %s", err, watchedObject,
+			)
+		}
+
 		klog.Errorf("Could not start a watch request for %s, error: %v", watchedObject, err)
 
 		return err
@@ -705,6 +750,9 @@ func watchLatest(
 
 	resourceVersion := listResult.GetResourceVersion()
 
+	watchStarted := make(chan error, 1)
+	var firstResultSent bool
+
 	watchFunc := func(options metav1.ListOptions) (apiWatch.Interface, error) {
 		if watchedObject.Name != "" {
 			options.FieldSelector = "metadata.name=" + watchedObject.Name
@@ -712,12 +760,46 @@ func watchLatest(
 			options.LabelSelector = watchedObject.Selector
 		}
 
-		return resource.Watch(context.Background(), options)
+		watch, err := resource.Watch(context.Background(), options)
+
+		if !firstResultSent {
+			if k8serrors.IsForbidden(err) {
+				watchStarted <- err
+
+				// This is to guard against a potential issue if https://github.com/kubernetes/kubernetes/pull/126038 is
+				// merged and the code below still calls w.Stop(), since closing a closed channel will cause a panic.
+				// w.Stop() can be called multiple times after https://github.com/kubernetes/kubernetes/pull/126125 is
+				// merged.
+				err = nil
+				watch = nil
+			} else {
+				// Send nil on no errors or recoverable errors
+				watchStarted <- nil
+			}
+
+			close(watchStarted)
+
+			firstResultSent = true
+		}
+
+		return watch, err
 	}
 
 	w, err := watch.NewRetryWatcher(resourceVersion, &cache.ListWatch{WatchFunc: watchFunc})
+	if err != nil {
+		return nil, nil, err
+	}
 
-	return w, listResult.Items, err
+	watchErr := <-watchStarted
+	if watchErr != nil {
+		// Stop the watcher if it's an unrecoverable first error and RetryWatcher won't stop on its own.
+		// This needs to be removed if https://github.com/kubernetes/kubernetes/pull/126038 is merged.
+		w.Stop()
+
+		return nil, nil, watchErr
+	}
+
+	return w, listResult.Items, nil
 }
 
 // removeWatch will remove a reference to the input watched object. If the references on the watched object become 0,
@@ -727,7 +809,7 @@ func (d *dynamicWatcher) removeWatch(watcher ObjectIdentifier, watchedObject Obj
 	delete(d.watchedToWatchers[watchedObject], watcher)
 
 	// Stop the watch API request if the watcher was the only one watching this object.
-	if len(d.watchedToWatchers[watchedObject]) == 0 {
+	if d.watches[watchedObject] != nil && len(d.watchedToWatchers[watchedObject]) == 0 {
 		// Tell relayWatchEvents that this is an intentional stop
 		d.watches[watchedObject].requestingStop = true
 		d.watches[watchedObject].watch.Stop()
