@@ -129,7 +129,155 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler, options *O
 	return
 }
 
-var _ = Describe("Test the client", Ordered, func() {
+var _ = Describe("Test a client without watch permissions", Ordered, func() {
+	var (
+		ctxTest       context.Context
+		dynWatcher    DynamicWatcher
+		reconcilerObj *reconciler
+		watcher       *corev1.ConfigMap
+		watched       *corev1.ConfigMap
+	)
+
+	BeforeAll(func() {
+		var cancelCtxTest context.CancelFunc
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+
+		DeferCleanup(func() { cancelCtxTest() })
+
+		watcher = &corev1.ConfigMap{
+			// This verbose definition is required for the GVK to be present on the object.
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "watcher-test",
+				Namespace: namespace,
+			},
+		}
+
+		_, err := k8sClient.CoreV1().ConfigMaps(namespace).Create(ctx, watcher, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		DeferCleanup(func() {
+			err := k8sClient.CoreV1().ConfigMaps(namespace).Delete(ctx, watcher.Name, metav1.DeleteOptions{})
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		// It really doesn't matter what the object being watched is so just reuse the watcher
+		watched = watcher
+
+		reconcilerObj = &reconciler{
+			ResultsChan: make(chan ObjectIdentifier, 20),
+		}
+
+		kubeconfig := noWatchUser.Config()
+		// Required for tests that involve restarting the test environment since new certs are generated.
+		kubeconfig.TLSClientConfig.Insecure = true
+		kubeconfig.TLSClientConfig.CAData = nil
+
+		dynWatcher, err = New(kubeconfig, reconcilerObj, nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(dynWatcher).NotTo(BeNil())
+
+		go func() {
+			defer GinkgoRecover()
+
+			err := dynWatcher.Start(ctxTest)
+			Expect(err).ToNot(HaveOccurred())
+		}()
+
+		<-dynWatcher.Started()
+	})
+
+	AfterAll(func(ctx SpecContext) {
+		err := k8sClient.RbacV1().ClusterRoleBindings().Delete(ctx, "watch-all", metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
+		}
+
+		err = k8sClient.RbacV1().ClusterRoles().Delete(ctx, "watch-all", metav1.DeleteOptions{})
+		if !k8serrors.IsNotFound(err) {
+			Expect(err).ToNot(HaveOccurred())
+		}
+	})
+
+	AfterEach(func() {
+		// Drain the test results channel.
+		for len(reconcilerObj.ResultsChan) != 0 {
+			_, ok := <-reconcilerObj.ResultsChan
+			Expect(ok).To(BeTrue())
+		}
+	})
+
+	It("Ensures the watch fails if the user is unauthorized", func() {
+		err := dynWatcher.AddWatcher(toObjectIdentifer(watcher), toObjectIdentifer(watched))
+		Expect(k8serrors.IsForbidden(err)).To(BeTrue(), "Expected the error to be forbidden")
+	})
+
+	It("Grant access and try again", func() {
+		By("Granting the user watch access")
+		watchAllRole := &rbacv1.ClusterRole{
+			ObjectMeta: metav1.ObjectMeta{Name: "watch-all"},
+			Rules: []rbacv1.PolicyRule{
+				{
+					Verbs:     []string{"watch"},
+					Resources: []string{"*"},
+					APIGroups: []string{"*"},
+				},
+			},
+		}
+
+		_, err := k8sClient.RbacV1().ClusterRoles().Create(ctx, watchAllRole, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		watchAllBinding := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "watch-all"},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "ClusterRole",
+				Name:     watchAllRole.Name,
+			},
+			Subjects: []rbacv1.Subject{
+				{
+					APIGroup: "rbac.authorization.k8s.io",
+					Kind:     "User",
+					Name:     "no-watch",
+				},
+			},
+		}
+
+		_, err = k8sClient.RbacV1().ClusterRoleBindings().Create(ctx, watchAllBinding, metav1.CreateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Adding the watch")
+		err = dynWatcher.AddWatcher(toObjectIdentifer(watcher), toObjectIdentifer(watched))
+		Expect(err).ToNot(HaveOccurred())
+		Eventually(dynWatcher.GetWatchCount, "3s").Should(Equal(uint(1)))
+		Eventually(reconcilerObj.ResultsChan, "3s").Should(HaveLen(1))
+	})
+
+	It("Ensures the watches restart on a Kubernetes API outage reevaluate permissions", func() {
+		By("Removing the user watch access")
+		err := k8sClient.RbacV1().ClusterRoleBindings().Delete(ctx, "watch-all", metav1.DeleteOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		By("Stopping the RetryWatcher under the hood to simulate an unrecoverable error")
+		typedDynamicWatcher, ok := dynWatcher.(*dynamicWatcher)
+		Expect(ok).To(BeTrue(), "Expected the DynamicWatcher interface to be dynamicWatcher type")
+		typedDynamicWatcher.lock.Lock()
+		typedDynamicWatcher.watches[toObjectIdentifer(watched)].watch.Stop()
+		typedDynamicWatcher.lock.Unlock()
+
+		By("Checking the watch is removed")
+		Eventually(dynWatcher.GetWatchCount, "10s").Should(Equal(uint(0)))
+
+		By("Checking that a reconcile for the object was called after the watch was removed")
+		Eventually(reconcilerObj.ResultsChan, "3s").Should(HaveLen(1))
+	})
+})
+
+var _ = Describe("Test the client", Ordered, Serial, func() {
 	var (
 		ctxTest        context.Context
 		dynamicWatcher DynamicWatcher
