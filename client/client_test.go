@@ -738,7 +738,7 @@ var _ = Describe("Test ObjectIdentifier", func() {
 			Namespace: "test-ns",
 			Name:      "watcher",
 		}
-		Expect(obj.String()).To(Equal("/v1, Kind=ConfigMap, Namespace=test-ns, Name=watcher, Selector="))
+		Expect(obj.String()).To(Equal("GroupVersion=v1, Kind=ConfigMap, Namespace=test-ns, Name=watcher"))
 	})
 
 	It("Verifies ObjectIdentifier.Validate", func() {
