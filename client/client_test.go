@@ -963,6 +963,20 @@ var _ = Describe("Test the client query API", Ordered, func() {
 				Expect(err).ToNot(HaveOccurred())
 			}
 		}
+
+		defaultNS, err := k8sClient.CoreV1().Namespaces().Get(ctx, "default", metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		annotations := defaultNS.GetAnnotations()
+		if annotations["my-test"] == "" {
+			return
+		}
+
+		delete(annotations, "my-test")
+
+		defaultNS.SetAnnotations(annotations)
+		_, err = k8sClient.CoreV1().Namespaces().Update(ctx, defaultNS, metav1.UpdateOptions{})
+		Expect(err).ToNot(HaveOccurred())
 	})
 
 	AfterEach(func() {
@@ -1282,5 +1296,61 @@ var _ = Describe("Test the client query API", Ordered, func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(gvr.Namespaced).To(BeTrue())
 		Expect(gvr.Resource).To(Equal("configmaps"))
+	})
+
+	It("A cluster scoped Get query with a namespace is handled correctly", func(ctx SpecContext) {
+		By("Performing a first query batch")
+		nsGVK := schema.GroupVersionKind{Kind: "Namespace", Version: "v1"}
+
+		err := dynamicWatcher.StartQueryBatch(watcherID)
+		Expect(err).ToNot(HaveOccurred())
+
+		defaultNS, err := dynamicWatcher.Get(watcherID, nsGVK, "some-namespace", "default")
+		Expect(err).ToNot(HaveOccurred())
+
+		err = dynamicWatcher.EndQueryBatch(watcherID)
+		Expect(err).ToNot(HaveOccurred())
+
+		Expect(defaultNS.GetName()).To(Equal("default"))
+		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(1)))
+
+		By("Performing a second duplicate query batch to ensure watches are not cleaned up")
+		err = dynamicWatcher.StartQueryBatch(watcherID)
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = dynamicWatcher.Get(watcherID, nsGVK, "some-namespace", "default")
+		Expect(err).ToNot(HaveOccurred())
+
+		err = dynamicWatcher.EndQueryBatch(watcherID)
+		Expect(err).ToNot(HaveOccurred())
+
+		Consistently(func(g Gomega) {
+			g.Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(1)))
+		}, "5s").Should(Succeed())
+
+		By("Performing an update to trigger a reconcile")
+
+		realDefaultNS, err := k8sClient.CoreV1().Namespaces().Get(ctx, "default", metav1.GetOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		annotations := realDefaultNS.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+
+		annotations["my-test"] = "test"
+
+		realDefaultNS.SetAnnotations(annotations)
+
+		_, err = k8sClient.CoreV1().Namespaces().Update(ctx, realDefaultNS, metav1.UpdateOptions{})
+		Expect(err).ToNot(HaveOccurred())
+
+		// One reconcile for the initial reconcile and the other for the update
+		Eventually(reconcilerObj.ResultsChan, "3s").Should(HaveLen(2))
+
+		By("Pulling from the cache without the namespace")
+		ns, err := dynamicWatcher.GetFromCache(nsGVK, "", "default")
+		Expect(err).ToNot(HaveOccurred())
+		Expect(ns).ToNot(BeNil())
 	})
 })
