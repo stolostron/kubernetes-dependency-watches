@@ -947,6 +947,17 @@ func (d *dynamicWatcher) fromCache(
 		return nil, ErrQueryBatchNotStarted
 	}
 
+	gvr, err := d.objectCache.GVKToGVR(watchedObjID.GroupVersionKind())
+	if err != nil {
+		klog.Errorf("Could not get the GVR for %s, error: %v", watchedObjID, err)
+
+		return nil, err
+	}
+
+	if !gvr.Namespaced { // ignore namespaces set on cluster-scoped resources
+		watchedObjID.Namespace = ""
+	}
+
 	batch.newWatched.Store(watchedObjID, nil)
 
 	d.lock.RLock()
@@ -966,7 +977,7 @@ func (d *dynamicWatcher) fromCache(
 
 	// addWatcher is idempotent, so if another goroutine held the lock and started the watch for this object,
 	// it'll just be a no-op.
-	err := d.addWatcher(watcher, &watchedObjID)
+	err = d.addWatcher(watcher, &watchedObjID)
 	if err != nil {
 		return nil, err
 	}
