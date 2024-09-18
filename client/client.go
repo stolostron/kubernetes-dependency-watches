@@ -166,18 +166,9 @@ type DynamicWatcher interface { //nolint: interfacebloat
 	GVKToGVR(gvk schema.GroupVersionKind) (ScopedGVR, error)
 }
 
-// New returns an implemenetation of DynamicWatcher that is ready to be started with the Start method. An error is
+// New returns an implementation of DynamicWatcher that is ready to be started with the Start method. An error is
 // returned if Kubernetes clients can't be instantiated with the input Kubernetes configuration.
 func New(config *rest.Config, reconciler Reconciler, options *Options) (DynamicWatcher, error) {
-	if options == nil {
-		options = &Options{}
-	}
-
-	rateLimiter := options.RateLimiter
-	if rateLimiter == nil {
-		rateLimiter = workqueue.DefaultControllerRateLimiter()
-	}
-
 	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize a dynamic Kubernetes client: %w", err)
@@ -188,7 +179,26 @@ func New(config *rest.Config, reconciler Reconciler, options *Options) (DynamicW
 		return nil, fmt.Errorf("failed to initialize a discovery Kubernetes client: %w", err)
 	}
 
-	watcher := dynamicWatcher{
+	return NewWithClients(dynamicClient, discoveryClient, reconciler, options), nil
+}
+
+// NewWithClients returns an implementation of DynamicWatcher that that is ready to be started with the Start method.
+func NewWithClients(
+	dynamicClient dynamic.Interface,
+	discoveryClient discovery.DiscoveryInterface,
+	reconciler Reconciler,
+	options *Options,
+) DynamicWatcher {
+	if options == nil {
+		options = &Options{}
+	}
+
+	rateLimiter := options.RateLimiter
+	if rateLimiter == nil {
+		rateLimiter = workqueue.DefaultControllerRateLimiter()
+	}
+
+	return &dynamicWatcher{
 		dynamicClient:     dynamicClient,
 		queryBatches:      sync.Map{},
 		objectCache:       NewObjectCache(discoveryClient, options.ObjectCacheOptions),
@@ -200,8 +210,6 @@ func New(config *rest.Config, reconciler Reconciler, options *Options) (DynamicW
 		watcherToWatches:  map[ObjectIdentifier]map[ObjectIdentifier]bool{},
 		watches:           map[ObjectIdentifier]*watchWithHandshake{},
 	}
-
-	return &watcher, nil
 }
 
 type queryBatch struct {

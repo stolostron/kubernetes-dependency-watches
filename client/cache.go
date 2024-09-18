@@ -62,7 +62,7 @@ func (l *lockedGVR) isExpired() bool {
 
 type objectCache struct {
 	cache           *sync.Map
-	discoveryClient *discovery.DiscoveryClient
+	discoveryClient discovery.DiscoveryInterface
 	// gvkToGVRCache is used as a cache of GVK to GVR mappings. The cache entries automatically expire after 10 minutes.
 	gvkToGVRCache *sync.Map
 	options       ObjectCacheOptions
@@ -81,7 +81,7 @@ type ObjectCacheOptions struct {
 }
 
 // NewObjectCache will create an object cache with the input discovery client.
-func NewObjectCache(discoveryClient *discovery.DiscoveryClient, options ObjectCacheOptions) ObjectCache {
+func NewObjectCache(discoveryClient discovery.DiscoveryInterface, options ObjectCacheOptions) ObjectCache {
 	if options.GVKToGVRCacheTTL == 0 {
 		options.GVKToGVRCacheTTL = 10 * time.Minute
 	}
