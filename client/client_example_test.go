@@ -204,7 +204,6 @@ func ExampleNewControllerRuntimeSource() {
 		For(&corev1.ConfigMap{}).
 		WatchesRawSource(sourceChan, &handler.EnqueueRequestForObject{}).
 		Complete(&ctrlRuntimeReconciler{})
-
 	if err != nil {
 		panic(err)
 	}
