@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
-	"k8s.io/klog"
+	klog "k8s.io/klog/v2"
 )
 
 var ErrNoCacheEntry = errors.New("there was no populated cache entry")
