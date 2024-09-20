@@ -815,11 +815,11 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 			return reconcile.Result{}, nil
 		}
 
-		rateLimiter := workqueue.DefaultControllerRateLimiter()
+		rateLimiter := workqueue.DefaultTypedControllerRateLimiter[ObjectIdentifier]()
 
 		dynWatcher := dynamicWatcher{
 			rateLimiter: rateLimiter,
-			Queue:       workqueue.NewRateLimitingQueue(rateLimiter),
+			Queue:       workqueue.NewTypedRateLimitingQueue[ObjectIdentifier](rateLimiter),
 			Reconciler:  &reconciler2{},
 		}
 
@@ -853,11 +853,11 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 			return reconcile.Result{}, nil
 		}
 
-		rateLimiter := workqueue.DefaultControllerRateLimiter()
+		rateLimiter := workqueue.DefaultTypedControllerRateLimiter[ObjectIdentifier]()
 
 		dynWatcher := dynamicWatcher{
 			rateLimiter: rateLimiter,
-			Queue:       workqueue.NewRateLimitingQueue(rateLimiter),
+			Queue:       workqueue.NewTypedRateLimitingQueue[ObjectIdentifier](rateLimiter),
 			Reconciler:  &reconciler2{},
 		}
 
@@ -891,11 +891,11 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 			return reconcile.Result{}, nil
 		}
 
-		rateLimiter := workqueue.DefaultControllerRateLimiter()
+		rateLimiter := workqueue.DefaultTypedControllerRateLimiter[ObjectIdentifier]()
 
 		dynWatcher := dynamicWatcher{
 			rateLimiter: rateLimiter,
-			Queue:       workqueue.NewRateLimitingQueue(rateLimiter),
+			Queue:       workqueue.NewTypedRateLimitingQueue[ObjectIdentifier](rateLimiter),
 			Reconciler:  &reconciler2{},
 		}
 
@@ -911,39 +911,6 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 		By("Verify that the reconciler was called twice")
 		Eventually(func() int { return reconcileCount }, "2s").Should(Equal(2))
 		Consistently(func() int { return reconcileCount }, "2s").Should(Equal(2))
-	})
-
-	It("Ensures invalid input in the queue is dropped", func() {
-		By("Making the Reconcile method keep track of the number of reconciles")
-		reconcileCount := 0
-		reconcileRV = func() (reconcile.Result, error) {
-			reconcileCount++
-
-			return reconcile.Result{}, nil
-		}
-
-		rateLimiter := workqueue.DefaultControllerRateLimiter()
-		dynWatcher := dynamicWatcher{
-			rateLimiter: rateLimiter,
-			Queue:       workqueue.NewRateLimitingQueue(rateLimiter),
-			Reconciler:  &reconciler2{},
-		}
-
-		ctx, cancel := context.WithCancel(context.TODO())
-		defer cancel()
-
-		go func() {
-			//nolint: revive
-			for dynWatcher.processNextWorkItem(ctx) {
-			}
-		}()
-
-		By("Handling an invalid object")
-		dynWatcher.Queue.Add("Not an ObjectIdentifier object")
-
-		By("Verifying the invalid object was dropped and the Reconcile method was not called")
-		Eventually(dynWatcher.Queue.Len, "2s").Should(Equal(0))
-		Consistently(func() int { return reconcileCount }, "2s").Should(Equal(0))
 	})
 })
 

@@ -15,7 +15,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -201,8 +200,9 @@ func ExampleNewControllerRuntimeSource() {
 	// This controller watches ConfigMaps and will additionally reconcile any time the dynamic watcher sees a watched
 	// object is updated.
 	err = ctrl.NewControllerManagedBy(mgr).
+		Named("ExampleNewControllerRuntimeSource").
 		For(&corev1.ConfigMap{}).
-		WatchesRawSource(sourceChan, &handler.EnqueueRequestForObject{}).
+		WatchesRawSource(sourceChan).
 		Complete(&ctrlRuntimeReconciler{})
 	if err != nil {
 		panic(err)

@@ -24,7 +24,6 @@ import (
 	"k8s.io/client-go/tools/watch"
 	"k8s.io/client-go/util/workqueue"
 	klog "k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/ratelimiter"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -52,7 +51,7 @@ type Options struct {
 	// RateLimiter is used to limit how frequently requests may be queued.
 	// Defaults to client-go's MaxOfRateLimiter which has both overall and per-item rate limiting. The overall is a
 	// token bucket and the per-item is exponential.
-	RateLimiter ratelimiter.RateLimiter
+	RateLimiter workqueue.TypedRateLimiter[ObjectIdentifier]
 	// EnableCache causes the watched objects to be cached and retrievable.
 	EnableCache bool
 	// DisableInitialReconcile causes the initial reconcile from the list request before the watch to not cause a
@@ -195,7 +194,7 @@ func NewWithClients(
 
 	rateLimiter := options.RateLimiter
 	if rateLimiter == nil {
-		rateLimiter = workqueue.DefaultControllerRateLimiter()
+		rateLimiter = workqueue.DefaultTypedControllerRateLimiter[ObjectIdentifier]()
 	}
 
 	return &dynamicWatcher{
@@ -236,9 +235,9 @@ type dynamicWatcher struct {
 	// dynamicClient is a client-go dynamic client used for the dynamic watches.
 	dynamicClient dynamic.Interface
 	lock          sync.RWMutex
-	Queue         workqueue.RateLimitingInterface
+	Queue         workqueue.TypedRateLimitingInterface[ObjectIdentifier]
 	Reconciler
-	rateLimiter ratelimiter.RateLimiter
+	rateLimiter workqueue.TypedRateLimiter[ObjectIdentifier]
 	objectCache ObjectCache
 	options     Options
 	// queryBatches is a sync.Map where the keys are watcher object identifiers and the values are queryBatch pointers.
@@ -264,7 +263,7 @@ type dynamicWatcher struct {
 func (d *dynamicWatcher) Start(ctx context.Context) error {
 	klog.Info("Starting the dynamic watcher")
 
-	d.Queue = workqueue.NewRateLimitingQueue(d.rateLimiter)
+	d.Queue = workqueue.NewTypedRateLimitingQueue[ObjectIdentifier](d.rateLimiter)
 
 	go func() {
 		<-ctx.Done()
@@ -305,10 +304,8 @@ func (d *dynamicWatcher) Started() <-chan struct{} {
 // relayWatchEvents will watch a channel tied to a Kubernetes API watch and then relay changes to the dynamicWatcher
 // queue. If the watch stops unintentionally after retries from the client-go RetryWatcher, it will be restarted at the
 // latest resourceVersion. This usually happens if the retry watcher tries to start watching again at a resource version
-// that is no longer in etcd. Note that if the RetryWatcher stops, is retried, and the client is forbidden to restart
-// the watch, the watch is cleaned up and each watcher will get added to the dynamicWatcher queue. Note that if
-// RetryWatcher retries the watch without stopping, it'll keep retrying if it encounters an issue where it is
-// forbidden. The proposed fix is in https://github.com/kubernetes/kubernetes/pull/126038.
+// that is no longer in etcd. Note that if the RetryWatcher's client is forbidden to watch the resource after starting,
+// the watch is cleaned up and each watcher will get added to the dynamicWatcher queue.
 func (d *dynamicWatcher) relayWatchEvents(
 	watchedObject ObjectIdentifier,
 	resource dynamic.ResourceInterface,
@@ -374,7 +371,7 @@ func (d *dynamicWatcher) relayWatchEvents(
 
 		w, watchedObjects, err := watchLatest(watchedObject, resource)
 		if err != nil {
-			if k8serrors.IsForbidden(err) {
+			if k8serrors.IsForbidden(err) || k8serrors.IsUnauthorized(err) {
 				klog.Errorf(
 					"Could not restart a watch request due to the client no longer having access. "+
 						"Cleaning up and starting reconciles for the watchers. Error: %v",
@@ -520,16 +517,7 @@ func (d *dynamicWatcher) processNextWorkItem(ctx context.Context) bool {
 }
 
 // reconcileHandler takes an object from the queue and calls the user's Reconcile method.
-func (d *dynamicWatcher) reconcileHandler(ctx context.Context, obj interface{}) {
-	// Verify that this is an actual ObjectIdentifier
-	watcher, ok := obj.(ObjectIdentifier)
-	if !ok {
-		// Remove the invalid object from the queue.
-		d.Queue.Forget(watcher)
-
-		return
-	}
-
+func (d *dynamicWatcher) reconcileHandler(ctx context.Context, watcher ObjectIdentifier) {
 	result, err := d.Reconcile(ctx, watcher)
 
 	switch {
@@ -681,7 +669,7 @@ func (d *dynamicWatcher) addWatcher(watcher ObjectIdentifier, watchedObject *Obj
 
 	w, watchedObjects, err := watchLatest(*watchedObject, resource)
 	if err != nil {
-		if k8serrors.IsForbidden(err) {
+		if k8serrors.IsForbidden(err) || k8serrors.IsUnauthorized(err) {
 			// When the user is forbidden to perform the watch, the original error is just "unknown".
 			err = fmt.Errorf(
 				"%w: ensure the client has the list and watch permissions for the query: %s", err, watchedObject,
@@ -771,15 +759,8 @@ func watchLatest(
 		watch, err := resource.Watch(context.Background(), options)
 
 		if !firstResultSent {
-			if k8serrors.IsForbidden(err) {
+			if k8serrors.IsForbidden(err) || k8serrors.IsUnauthorized(err) {
 				watchStarted <- err
-
-				// This is to guard against a potential issue if https://github.com/kubernetes/kubernetes/pull/126038 is
-				// merged and the code below still calls w.Stop(), since closing a closed channel will cause a panic.
-				// w.Stop() can be called multiple times after https://github.com/kubernetes/kubernetes/pull/126125 is
-				// merged.
-				err = nil
-				watch = nil
 			} else {
 				// Send nil on no errors or recoverable errors
 				watchStarted <- nil
@@ -800,8 +781,7 @@ func watchLatest(
 
 	watchErr := <-watchStarted
 	if watchErr != nil {
-		// Stop the watcher if it's an unrecoverable first error and RetryWatcher won't stop on its own.
-		// This needs to be removed if https://github.com/kubernetes/kubernetes/pull/126038 is merged.
+		// The watcher should already be stopped, but it's safe to call this multiple times in v0.31+.
 		w.Stop()
 
 		return nil, nil, watchErr

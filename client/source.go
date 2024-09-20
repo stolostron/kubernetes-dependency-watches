@@ -7,6 +7,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
@@ -18,12 +19,9 @@ const defaultBufferSize = 1024
 // source.Channel. This source.Channel can be used in the controller-runtime builder.Builder.WatchesRawSource method.
 // This source.Channel will only send event.GenericEvent typed events, so any handlers specified in the
 // builder.Builder.WatchesRawSource method will need to handle that.
-func NewControllerRuntimeSource() (*ControllerRuntimeSourceReconciler, *source.Channel) {
+func NewControllerRuntimeSource() (*ControllerRuntimeSourceReconciler, source.Source) {
 	eventChan := make(chan event.GenericEvent, defaultBufferSize)
-	sourceChan := &source.Channel{
-		Source:         eventChan,
-		DestBufferSize: defaultBufferSize,
-	}
+	sourceChan := source.Channel(eventChan, &handler.EnqueueRequestForObject{})
 
 	return &ControllerRuntimeSourceReconciler{eventChan}, sourceChan
 }

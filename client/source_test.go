@@ -13,7 +13,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -79,8 +78,9 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		err = ctrl.NewControllerManagedBy(mgr).
+			Named("SourceTest").
 			For(&corev1.ConfigMap{}).
-			WatchesRawSource(sourceChan, &handler.EnqueueRequestForObject{}).
+			WatchesRawSource(sourceChan).
 			Complete(&ctrlRuntimeReconciler)
 		Expect(err).ToNot(HaveOccurred())
 
