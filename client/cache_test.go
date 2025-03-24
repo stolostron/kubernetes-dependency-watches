@@ -99,6 +99,15 @@ var _ = Describe("Test the cache", Ordered, func() {
 		Expect(err).To(MatchError(ErrNoVersionedResource))
 	})
 
+	It("Does not convert to GVRs that can't be watched", func() {
+		_, err := cache.GVKToGVR(schema.GroupVersionKind{
+			Group:   "authorization.k8s.io",
+			Version: "v1",
+			Kind:    "SubjectAccessReview",
+		})
+		Expect(err).To(MatchError(ErrNoVersionedResource))
+	})
+
 	It("Can have its cache cleared", func() {
 		gvr, err := cache.GVKToGVR(configMapGVK)
 		Expect(err).ToNot(HaveOccurred())
