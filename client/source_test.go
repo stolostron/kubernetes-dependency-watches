@@ -29,18 +29,15 @@ func (r *controllerRuntimeReconciler) Reconcile(_ context.Context, _ reconcile.R
 
 var _ = Describe("Test the controller-runtime source wrapper", func() {
 	var (
-		ctxTest               context.Context
-		cancelCtxTest         context.CancelFunc
-		dynamicWatcher        DynamicWatcher
-		ctrlRuntimeReconciler controllerRuntimeReconciler
-		watched               []k8sObject
-		watchedObjIDs         []ObjectIdentifier
-		watcher               *corev1.ConfigMap
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+		dynamicWatcher         DynamicWatcher
+		ctrlRuntimeReconciler  controllerRuntimeReconciler
+		watched                []k8sObject
+		watchedObjIDs          []ObjectIdentifier
+		watcher                *corev1.ConfigMap
 	)
 
 	BeforeEach(func() {
-		ctxTest, cancelCtxTest = context.WithCancel(ctx)
-
 		ctrlRuntimeReconciler = controllerRuntimeReconciler{}
 		reconciler, sourceChan := NewControllerRuntimeSource()
 		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconciler, nil)
