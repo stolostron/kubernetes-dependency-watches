@@ -276,7 +276,6 @@ func (d *dynamicWatcher) Start(ctx context.Context) error {
 	d.started = true
 	close(d.startedChan)
 
-	//nolint: revive
 	for d.processNextWorkItem(ctx) {
 	}
 

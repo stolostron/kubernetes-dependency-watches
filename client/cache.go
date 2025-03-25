@@ -328,13 +328,13 @@ func (o *objectCache) GVKToGVR(gvk schema.GroupVersionKind) (ScopedGVR, error) {
 
 // Clear will entirely clear the cache.
 func (o *objectCache) Clear() {
-	o.cache.Range(func(key, value any) bool {
+	o.cache.Range(func(key, _ any) bool {
 		o.cache.Delete(key)
 
 		return true
 	})
 
-	o.gvkToGVRCache.Range(func(key, value any) bool {
+	o.gvkToGVRCache.Range(func(key, _ any) bool {
 		o.gvkToGVRCache.Delete(key)
 
 		return true

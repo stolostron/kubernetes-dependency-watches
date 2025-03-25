@@ -131,17 +131,14 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler, options *O
 
 var _ = Describe("Test a client without watch permissions", Ordered, func() {
 	var (
-		ctxTest       context.Context
-		dynWatcher    DynamicWatcher
-		reconcilerObj *reconciler
-		watcher       *corev1.ConfigMap
-		watched       *corev1.ConfigMap
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+		dynWatcher             DynamicWatcher
+		reconcilerObj          *reconciler
+		watcher                *corev1.ConfigMap
+		watched                *corev1.ConfigMap
 	)
 
 	BeforeAll(func() {
-		var cancelCtxTest context.CancelFunc
-		ctxTest, cancelCtxTest = context.WithCancel(ctx)
-
 		DeferCleanup(func() { cancelCtxTest() })
 
 		watcher = &corev1.ConfigMap{
@@ -279,18 +276,15 @@ var _ = Describe("Test a client without watch permissions", Ordered, func() {
 
 var _ = Describe("Test the client", Ordered, Serial, func() {
 	var (
-		ctxTest        context.Context
-		dynamicWatcher DynamicWatcher
-		reconcilerObj  *reconciler
-		watched        []k8sObject
-		watchedObjIDs  []ObjectIdentifier
-		watcher        *corev1.ConfigMap
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+		dynamicWatcher         DynamicWatcher
+		reconcilerObj          *reconciler
+		watched                []k8sObject
+		watchedObjIDs          []ObjectIdentifier
+		watcher                *corev1.ConfigMap
 	)
 
 	BeforeAll(func() {
-		var cancelCtxTest context.CancelFunc
-		ctxTest, cancelCtxTest = context.WithCancel(ctx)
-
 		DeferCleanup(func() { cancelCtxTest() })
 
 		reconcilerObj = &reconciler{
@@ -472,24 +466,21 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		_, err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watchedSecret, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
-		Consistently(reconcilerObj.ResultsChan, "3s").Should(HaveLen(0))
+		Consistently(reconcilerObj.ResultsChan, "3s").Should(BeEmpty())
 	})
 })
 
 var _ = Describe("Test the client with the initial reconcile is disabled", Ordered, func() {
 	var (
-		ctxTest        context.Context
-		dynamicWatcher DynamicWatcher
-		reconcilerObj  *reconciler
-		watched        []k8sObject
-		watchedObjIDs  []ObjectIdentifier
-		watcher        *corev1.ConfigMap
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+		dynamicWatcher         DynamicWatcher
+		reconcilerObj          *reconciler
+		watched                []k8sObject
+		watchedObjIDs          []ObjectIdentifier
+		watcher                *corev1.ConfigMap
 	)
 
 	BeforeAll(func() {
-		var cancelCtxTest context.CancelFunc
-		ctxTest, cancelCtxTest = context.WithCancel(ctx)
-
 		DeferCleanup(func() { cancelCtxTest() })
 
 		reconcilerObj = &reconciler{
@@ -530,7 +521,7 @@ var _ = Describe("Test the client with the initial reconcile is disabled", Order
 		Expect(err).ToNot(HaveOccurred())
 
 		By("Checking that the reconciler was called during the initial list")
-		Consistently(reconcilerObj.ResultsChan, "5s").Should(HaveLen(0))
+		Consistently(reconcilerObj.ResultsChan, "5s").Should(BeEmpty())
 
 		By("Updating the watched object")
 		watchedSecret := watched[0].(*corev1.Secret)
@@ -545,14 +536,13 @@ var _ = Describe("Test the client with the initial reconcile is disabled", Order
 
 var _ = Describe("Test the client clean up", Ordered, func() {
 	var (
-		watcherID      ObjectIdentifier
-		dynamicWatcher DynamicWatcher
-		reconcilerObj  *reconciler
+		testCtx, testCtxCancel = context.WithCancel(ctx)
+		watcherID              ObjectIdentifier
+		dynamicWatcher         DynamicWatcher
+		reconcilerObj          *reconciler
 	)
 
 	BeforeAll(func() {
-		testCtx, testCtxCancel := context.WithCancel(ctx)
-
 		DeferCleanup(func() { testCtxCancel() })
 
 		reconcilerObj = &reconciler{
@@ -676,16 +666,13 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 
 var _ = Describe("Test the client clean up", Ordered, func() {
 	var (
-		ctxTest        context.Context
-		cancelCtxTest  context.CancelFunc
-		dynamicWatcher DynamicWatcher
-		watched        []k8sObject
-		watcher        *corev1.ConfigMap
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+		dynamicWatcher         DynamicWatcher
+		watched                []k8sObject
+		watcher                *corev1.ConfigMap
 	)
 
 	BeforeAll(func() {
-		ctxTest, cancelCtxTest = context.WithCancel(ctx)
-
 		DeferCleanup(func() {
 			// The test should cancel the context, but this ensures it is cancelled during a failure
 			cancelCtxTest()
@@ -827,7 +814,6 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 		dynWatcher.Queue.Add(obj)
 
 		go func() {
-			//nolint: revive
 			for dynWatcher.processNextWorkItem(ctx) {
 			}
 		}()
@@ -865,7 +851,6 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 		dynWatcher.Queue.Add(obj)
 
 		go func() {
-			//nolint: revive
 			for dynWatcher.processNextWorkItem(ctx) {
 			}
 		}()
@@ -903,7 +888,6 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 		dynWatcher.Queue.Add(obj)
 
 		go func() {
-			//nolint: revive
 			for dynWatcher.processNextWorkItem(ctx) {
 			}
 		}()
@@ -975,18 +959,15 @@ var _ = Describe("Test dynamicWatcher not started", func() {
 
 var _ = Describe("Test dynamicWatcher cache disabled errors", Ordered, func() {
 	var (
-		ctxTest        context.Context
-		dynamicWatcher DynamicWatcher
-		reconcilerObj  *reconciler
-		watched        []k8sObject
-		watcher        *corev1.ConfigMap
-		watcherID      ObjectIdentifier
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+		dynamicWatcher         DynamicWatcher
+		reconcilerObj          *reconciler
+		watched                []k8sObject
+		watcher                *corev1.ConfigMap
+		watcherID              ObjectIdentifier
 	)
 
 	BeforeAll(func() {
-		var cancelCtxTest context.CancelFunc
-		ctxTest, cancelCtxTest = context.WithCancel(ctx)
-
 		DeferCleanup(func() { cancelCtxTest() })
 
 		reconcilerObj = &reconciler{
@@ -1041,18 +1022,15 @@ var _ = Describe("Test dynamicWatcher cache disabled errors", Ordered, func() {
 
 var _ = Describe("Test the client query API", Ordered, func() {
 	var (
-		ctxTest        context.Context
-		dynamicWatcher DynamicWatcher
-		reconcilerObj  *reconciler
-		watched        []k8sObject
-		watcher        *corev1.ConfigMap
-		watcherID      ObjectIdentifier
+		ctxTest, cancelCtxTest = context.WithCancel(ctx)
+		dynamicWatcher         DynamicWatcher
+		reconcilerObj          *reconciler
+		watched                []k8sObject
+		watcher                *corev1.ConfigMap
+		watcherID              ObjectIdentifier
 	)
 
 	BeforeAll(func() {
-		var cancelCtxTest context.CancelFunc
-		ctxTest, cancelCtxTest = context.WithCancel(ctx)
-
 		DeferCleanup(func() { cancelCtxTest() })
 
 		reconcilerObj = &reconciler{
