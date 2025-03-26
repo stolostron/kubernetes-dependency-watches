@@ -21,3 +21,5 @@ updates:
       gomod:
         patterns:
           - "*"
+        exclude-patterns:
+          - "*.k8s.io/*"
