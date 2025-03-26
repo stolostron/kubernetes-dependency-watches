@@ -15,11 +15,10 @@ updates:
     groups:
       gomod-k8s.io:
         patterns:
+          - "k8s.io/*"
           - "*.k8s.io/*"
         update-types:
           - patch
       gomod:
         patterns:
           - "*"
-        exclude-patterns:
-          - "*.k8s.io/*"
