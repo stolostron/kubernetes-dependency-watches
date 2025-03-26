@@ -16,5 +16,6 @@
 
 .go/
 bin/
+report_*.json
 gosec.json
 .vscode/
