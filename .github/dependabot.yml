@@ -13,6 +13,11 @@ updates:
     schedule:
       interval: weekly
     groups:
+      gomod-k8s.io:
+        patterns:
+          - "*.k8s.io/*"
+        update-types:
+          - patch
       gomod:
         patterns:
           - "*"
