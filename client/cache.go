@@ -292,31 +292,44 @@ func (o *objectCache) GVKToGVR(gvk schema.GroupVersionKind) (ScopedGVR, error) {
 		return ScopedGVR{}, err
 	}
 
+	var firstUnwatchable ScopedGVR
+
 	for _, apiRes := range resources.APIResources {
 		if apiRes.Kind == gvk.Kind {
+			gvr := ScopedGVR{
+				GroupVersionResource: schema.GroupVersionResource{
+					Group:    gvk.GroupVersion().Group,
+					Version:  gvk.GroupVersion().Version,
+					Resource: apiRes.Name,
+				},
+				Namespaced: apiRes.Namespaced,
+			}
+
 			if !strings.Contains(apiRes.Verbs.String(), "watch") {
 				klog.V(2).Infof("Excluding API resource because it does not support watch: %v", apiRes)
+
+				if firstUnwatchable.Resource == "" {
+					firstUnwatchable = gvr
+				}
 
 				continue
 			}
 
 			klog.V(2).Infof("Found the API resource: %v", apiRes)
 
-			gv := gvk.GroupVersion()
-
-			gvr := ScopedGVR{
-				GroupVersionResource: schema.GroupVersionResource{
-					Group:    gv.Group,
-					Version:  gv.Version,
-					Resource: apiRes.Name,
-				},
-				Namespaced: apiRes.Namespaced,
-			}
-
 			lockedGVRObj.gvr = &gvr
 
 			return gvr, nil
 		}
+	}
+
+	if firstUnwatchable.Resource != "" {
+		klog.V(2).Infof("Returning APIResource for the GVK that doesn't support watch as a fallback: %v", gvk)
+
+		lockedGVRObj.gvr = &firstUnwatchable
+		lockedGVRObj.expires = now.Add(o.options.MissingAPIResourceCacheTTL)
+
+		return firstUnwatchable, fmt.Errorf("%v cannot be watched: %w", gvk, ErrResourceUnwatchable)
 	}
 
 	klog.V(2).Infof("The APIResource for the GVK wasn't found: %v", gvk)
