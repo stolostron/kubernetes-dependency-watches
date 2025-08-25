@@ -5,9 +5,9 @@ go 1.23.0
 require (
 	github.com/onsi/ginkgo/v2 v2.23.4
 	github.com/onsi/gomega v1.38.0
-	k8s.io/api v0.31.11
-	k8s.io/apimachinery v0.31.11
-	k8s.io/client-go v0.31.11
+	k8s.io/api v0.31.12
+	k8s.io/apimachinery v0.31.12
+	k8s.io/client-go v0.31.12
 	k8s.io/klog/v2 v2.130.1
 	sigs.k8s.io/controller-runtime v0.19.7
 )
@@ -64,7 +64,7 @@ require (
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apiextensions-apiserver v0.31.11 // indirect
+	k8s.io/apiextensions-apiserver v0.31.12 // indirect
 	k8s.io/kube-openapi v0.0.0-20250628140032-d90c4fd18f59 // indirect
 	k8s.io/utils v0.0.0-20240711033017-18e509b52bc8 // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
