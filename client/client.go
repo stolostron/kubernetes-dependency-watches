@@ -779,7 +779,7 @@ func watchLatest(
 		return watch, err
 	}
 
-	w, err := watch.NewRetryWatcher(resourceVersion, &cache.ListWatch{WatchFunc: watchFunc})
+	w, err := watch.NewRetryWatcherWithContext(context.TODO(), resourceVersion, &cache.ListWatch{WatchFunc: watchFunc})
 	if err != nil {
 		return nil, nil, err
 	}
