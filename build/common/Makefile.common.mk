@@ -11,15 +11,18 @@ GOLANGCI_VERSION := v1.64.8
 # https://github.com/mvdan/gofumpt/releases/latest
 GOFUMPT_VERSION := v0.7.0
 # https://github.com/daixiang0/gci/releases/latest
-GCI_VERSION := v0.13.5
+GCI_VERSION := v0.13.6
 # https://github.com/securego/gosec/releases/latest
 GOSEC_VERSION := v2.22.2
 # https://github.com/kubernetes-sigs/kubebuilder/releases/latest
 KBVERSION := 3.15.1
-# https://github.com/kubernetes/kubernetes/releases/latest
-ENVTEST_K8S_VERSION := 1.30.x
 # https://github.com/alexfalkowski/gocovmerge/releases/latest
 GOCOVMERGE_VERSION := v2.15.0
+# ref: https://book.kubebuilder.io/reference/envtest.html?highlight=setup-envtest#installation
+# Parse the controller-runtime version from go.mod and parse to its release-X.Y git branch
+ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
+# Parse the Kubernetes API version from go.mod (which is v0.Y.Z) and convert to the corresponding v1.Y.Z format
+ENVTEST_K8S_VERSION := $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 
 LOCAL_BIN ?= $(error LOCAL_BIN is not set.)
 ifneq ($(findstring $(LOCAL_BIN), $(PATH)), $(LOCAL_BIN))
@@ -114,7 +117,8 @@ kubebuilder:
 
 .PHONY: envtest
 envtest:
-	$(call go-get-tool,sigs.k8s.io/controller-runtime/tools/setup-envtest@latest)
+	# Installing setup-envtest using the release-X.Y branch from the version specified in go.mod
+	$(call go-get-tool,sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION))
 
 .PHONY: gosec
 gosec:
