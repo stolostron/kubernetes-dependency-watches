@@ -5,19 +5,19 @@
 # https://github.com/kubernetes-sigs/controller-tools/releases/latest
 CONTROLLER_GEN_VERSION := v0.19.0
 # https://github.com/kubernetes-sigs/kustomize/releases/latest
-KUSTOMIZE_VERSION := v5.6.0
+KUSTOMIZE_VERSION := v5.7.1
 # https://github.com/golangci/golangci-lint/releases/latest
 GOLANGCI_VERSION := v1.64.8
 # https://github.com/mvdan/gofumpt/releases/latest
-GOFUMPT_VERSION := v0.7.0
+GOFUMPT_VERSION := v0.9.1
 # https://github.com/daixiang0/gci/releases/latest
-GCI_VERSION := v0.13.6
+GCI_VERSION := v0.13.7
 # https://github.com/securego/gosec/releases/latest
-GOSEC_VERSION := v2.22.2
+GOSEC_VERSION := v2.22.10
 # https://github.com/kubernetes-sigs/kubebuilder/releases/latest
-KBVERSION := 3.15.1
+KBVERSION := 4.9.0
 # https://github.com/alexfalkowski/gocovmerge/releases/latest
-GOCOVMERGE_VERSION := v2.15.0
+GOCOVMERGE_VERSION := v2.16.0
 # ref: https://book.kubebuilder.io/reference/envtest.html?highlight=setup-envtest#installation
 # Parse the controller-runtime version from go.mod and parse to its release-X.Y git branch
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')

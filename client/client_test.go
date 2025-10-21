@@ -126,7 +126,7 @@ func getDynamicWatcher(ctx context.Context, reconcilerObj Reconciler, options *O
 	Expect(dynamicWatcher).NotTo(BeNil())
 
 	// Return the named return values.
-	return
+	return watcher, watched, dynamicWatcher
 }
 
 var _ = Describe("Test a client without watch permissions", Ordered, func() {
