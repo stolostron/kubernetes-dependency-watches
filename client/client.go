@@ -533,8 +533,6 @@ func (d *dynamicWatcher) reconcileHandler(ctx context.Context, watcher ObjectIde
 		// to result.RequestAfter
 		d.Queue.Forget(watcher)
 		d.Queue.AddAfter(watcher, result.RequeueAfter)
-	case result.Requeue:
-		d.Queue.AddRateLimited(watcher)
 	default:
 		// Finally, if no error occurs we Forget this item so it does not
 		// get queued again until another change happens.

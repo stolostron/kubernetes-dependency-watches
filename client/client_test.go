@@ -859,43 +859,6 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 		Eventually(func() int { return reconcileCount }, "2s").Should(Equal(2))
 		Consistently(func() int { return reconcileCount }, "2s").Should(Equal(2))
 	})
-
-	It("Verifies a requeue occurs when the Reconcile method returns Requeue=true", func() {
-		reconcileCount := 0
-		ctx, cancel := context.WithCancel(context.TODO())
-		defer cancel()
-
-		By("Making the Reconcile method return Requeue=true on the first call")
-		reconcileRV = func() (reconcile.Result, error) {
-			reconcileCount++
-
-			if reconcileCount == 1 {
-				return reconcile.Result{Requeue: true}, nil
-			}
-
-			return reconcile.Result{}, nil
-		}
-
-		rateLimiter := workqueue.DefaultTypedControllerRateLimiter[ObjectIdentifier]()
-
-		dynWatcher := dynamicWatcher{
-			rateLimiter: rateLimiter,
-			Queue:       workqueue.NewTypedRateLimitingQueue[ObjectIdentifier](rateLimiter),
-			Reconciler:  &reconciler2{},
-		}
-
-		By("Handling a single object")
-		dynWatcher.Queue.Add(obj)
-
-		go func() {
-			for dynWatcher.processNextWorkItem(ctx) {
-			}
-		}()
-
-		By("Verify that the reconciler was called twice")
-		Eventually(func() int { return reconcileCount }, "2s").Should(Equal(2))
-		Consistently(func() int { return reconcileCount }, "2s").Should(Equal(2))
-	})
 })
 
 var _ = Describe("Test dynamicWatcher not started", func() {
