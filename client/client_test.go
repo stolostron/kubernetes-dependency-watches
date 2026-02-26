@@ -415,7 +415,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 
 		By("Checking that a reconcile for each object was called")
 		// This is a longer timeout to account for the API server needing to start up.
-		Eventually(reconcilerObj.ResultsChan, "60s").Should(HaveLen(2))
+		Eventually(reconcilerObj.ResultsChan, "120s").Should(HaveLen(2))
 	})
 
 	It("Verifies the watch count", func() {
