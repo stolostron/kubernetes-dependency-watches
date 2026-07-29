@@ -1,5 +1,3 @@
-// Copyright Contributors to the Open Cluster Management project
-
 package client
 
 import (
@@ -41,6 +39,7 @@ var _ = BeforeSuite(func() {
 	format.TruncatedDiff = false
 
 	By("bootstrapping the test environment")
+
 	testEnv = &envtest.Environment{ControlPlaneStopTimeout: time.Minute * 3}
 
 	var err error
@@ -53,8 +52,8 @@ var _ = BeforeSuite(func() {
 	Expect(err).ToNot(HaveOccurred())
 
 	// Required for tests that involve restarting the test environment since new certs are generated.
-	k8sConfig.TLSClientConfig.Insecure = true
-	k8sConfig.TLSClientConfig.CAData = nil
+	k8sConfig.Insecure = true
+	k8sConfig.CAData = nil
 
 	k8sClient, err = kubernetes.NewForConfig(k8sConfig)
 	Expect(err).ToNot(HaveOccurred())
@@ -100,6 +99,7 @@ var _ = BeforeSuite(func() {
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
+
 	err := k8sClient.CoreV1().Namespaces().Delete(ctx, namespace, metav1.DeleteOptions{})
 	Expect(err).ToNot(HaveOccurred())
 

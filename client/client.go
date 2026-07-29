@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -114,7 +115,7 @@ func (o ObjectIdentifier) Validate() error {
 	return nil
 }
 
-// GVK returns the GroupVersionKind of the ObjectIdentifier object.
+// GroupVersionKind returns the GroupVersionKind of the ObjectIdentifier object.
 func (o ObjectIdentifier) GroupVersionKind() schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: o.Group, Version: o.Version, Kind: o.Kind}
 }
@@ -182,7 +183,7 @@ func New(config *rest.Config, reconciler Reconciler, options *Options) (DynamicW
 	return NewWithClients(dynamicClient, discoveryClient, reconciler, options), nil
 }
 
-// NewWithClients returns an implementation of DynamicWatcher that that is ready to be started with the Start method.
+// NewWithClients returns an implementation of DynamicWatcher that is ready to be started with the Start method.
 func NewWithClients(
 	dynamicClient dynamic.Interface,
 	discoveryClient discovery.DiscoveryInterface,
@@ -306,6 +307,8 @@ func (d *dynamicWatcher) Started() <-chan struct{} {
 // latest resourceVersion. This usually happens if the retry watcher tries to start watching again at a resource version
 // that is no longer in etcd. Note that if the RetryWatcher's client is forbidden to watch the resource after starting,
 // the watch is cleaned up and each watcher will get added to the dynamicWatcher queue.
+//
+//nolint:funcorder
 func (d *dynamicWatcher) relayWatchEvents(
 	watchedObject ObjectIdentifier,
 	resource dynamic.ResourceInterface,
@@ -362,6 +365,7 @@ func (d *dynamicWatcher) relayWatchEvents(
 
 			// Let the caller know that watch has cleaned up.
 			watch.stopped <- watchedObject
+
 			close(watch.stopped)
 
 			return
@@ -423,6 +427,8 @@ func (d *dynamicWatcher) relayWatchEvents(
 
 // updateCacheFromWatchEvent will take a watch event and update the cache appropriately. This is meant to be called
 // from relayWatchEvent.
+//
+//nolint:funcorder
 func (d *dynamicWatcher) updateCacheFromWatchEvent(watchedObject ObjectIdentifier, watchEvent apiWatch.Event) {
 	if !d.options.EnableCache {
 		return
@@ -503,6 +509,8 @@ func (d *dynamicWatcher) updateCacheFromWatchEvent(watchedObject ObjectIdentifie
 
 // processNextWorkItem will read a single work item off the queue and attempt to process it, by calling the
 // reconcileHandler. A bool is returned based on if the queue is shutdown due to the dynamicWatcher shutting down.
+//
+//nolint:funcorder
 func (d *dynamicWatcher) processNextWorkItem(ctx context.Context) bool {
 	obj, shutdown := d.Queue.Get()
 	if shutdown {
@@ -519,6 +527,8 @@ func (d *dynamicWatcher) processNextWorkItem(ctx context.Context) bool {
 }
 
 // reconcileHandler takes an object from the queue and calls the user's Reconcile method.
+//
+//nolint:funcorder
 func (d *dynamicWatcher) reconcileHandler(ctx context.Context, watcher ObjectIdentifier) {
 	result, err := d.Reconcile(ctx, watcher)
 
@@ -570,9 +580,7 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 
 	existingWatches := make(map[ObjectIdentifier]bool, len(d.watcherToWatches[watcher]))
 
-	for key, val := range d.watcherToWatches[watcher] {
-		existingWatches[key] = val
-	}
+	maps.Copy(existingWatches, d.watcherToWatches[watcher])
 
 	watchedObjectsSet := make(map[ObjectIdentifier]bool, len(watchedObjects))
 
@@ -625,6 +633,8 @@ func (d *dynamicWatcher) AddOrUpdateWatcher(watcher ObjectIdentifier, watchedObj
 
 // addWatcher will start a watch for the watcher. Note that it's expected that the lock is already
 // acquired by the caller.
+//
+//nolint:funcorder
 func (d *dynamicWatcher) addWatcher(watcher ObjectIdentifier, watchedObject *ObjectIdentifier) error {
 	if watch, ok := d.watches[*watchedObject]; ok && watch.requestingStop {
 		return ErrWatchStopping
@@ -795,6 +805,8 @@ func watchLatest(
 
 // removeWatch will remove a reference to the input watched object. If the references on the watched object become 0,
 // the watch API request is stopped. Note that it's expected that the lock is already acquired by the caller.
+//
+//nolint:funcorder
 func (d *dynamicWatcher) removeWatch(watcher ObjectIdentifier, watchedObject ObjectIdentifier) <-chan ObjectIdentifier {
 	delete(d.watcherToWatches[watcher], watchedObject)
 	delete(d.watchedToWatchers[watchedObject], watcher)
@@ -849,6 +861,8 @@ func (d *dynamicWatcher) RemoveWatcher(watcher ObjectIdentifier) error {
 // waitForStoppedWatches will take a slice of channels indicating when a watch has been completely stopped.
 // After the watch has stopped, it will cleanup the d.watches map. Note that the lock must be unlocked for this
 // method call.
+//
+//nolint:funcorder
 func (d *dynamicWatcher) waitForStoppedWatches(stoppedWatches []<-chan ObjectIdentifier) {
 	// Wait for all the watches to stop before returning
 	for i := range stoppedWatches {
@@ -915,6 +929,8 @@ func (d *dynamicWatcher) StartQueryBatch(watcher ObjectIdentifier) error {
 
 // fromCache will first query the cache for the watched object(s). If it's not present, a watch is started and the
 // method returns the object(s) once cached.
+//
+//nolint:funcorder
 func (d *dynamicWatcher) fromCache(
 	watcher ObjectIdentifier, watchedObjID ObjectIdentifier,
 ) ([]unstructured.Unstructured, error) {
