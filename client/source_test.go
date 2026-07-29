@@ -1,5 +1,3 @@
-// Copyright Contributors to the Open Cluster Management project
-
 package client
 
 import (
@@ -43,6 +41,7 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconciler, nil)
 
 		watchedObjIDs = []ObjectIdentifier{}
+
 		for _, watchedObj := range watched {
 			id := toObjectIdentifer(watchedObj)
 			id.Namespace = namespace // ensure namespace is set, even (possibly "incorrectly") on cluster-scoped objects
@@ -116,12 +115,14 @@ var _ = Describe("Test the controller-runtime source wrapper", func() {
 
 	It("Verifies that a controller-runtime reconciler can use this library", func() {
 		By("Adding the watcher with a single watched object")
+
 		err := dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs[0])
 		Expect(err).ToNot(HaveOccurred())
 
 		Eventually(func() int { return ctrlRuntimeReconciler.ReconcileCount }, "5s").Should(Equal(1))
 
 		By("Updating a watched object to trigger a reconcile")
+
 		watchedSecret := watched[0].(*corev1.Secret)
 		watchedSecret.StringData = map[string]string{"hello": "world"}
 		watched[0], err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watchedSecret, metav1.UpdateOptions{})

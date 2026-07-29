@@ -1,5 +1,3 @@
-// Copyright Contributors to the Open Cluster Management project
-
 package client
 
 import (
@@ -170,8 +168,8 @@ var _ = Describe("Test a client without watch permissions", Ordered, func() {
 
 		kubeconfig := noWatchUser.Config()
 		// Required for tests that involve restarting the test environment since new certs are generated.
-		kubeconfig.TLSClientConfig.Insecure = true
-		kubeconfig.TLSClientConfig.CAData = nil
+		kubeconfig.Insecure = true
+		kubeconfig.CAData = nil
 
 		dynWatcher, err = New(kubeconfig, reconcilerObj, nil)
 		Expect(err).ToNot(HaveOccurred())
@@ -214,6 +212,7 @@ var _ = Describe("Test a client without watch permissions", Ordered, func() {
 
 	It("Grant access and try again", func() {
 		By("Granting the user watch access")
+
 		watchAllRole := &rbacv1.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{Name: "watch-all"},
 			Rules: []rbacv1.PolicyRule{
@@ -248,6 +247,7 @@ var _ = Describe("Test a client without watch permissions", Ordered, func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		By("Adding the watch")
+
 		err = dynWatcher.AddWatcher(toObjectIdentifer(watcher), toObjectIdentifer(watched))
 		Expect(err).ToNot(HaveOccurred())
 		Eventually(dynWatcher.GetWatchCount, "3s").Should(Equal(uint(1)))
@@ -256,10 +256,12 @@ var _ = Describe("Test a client without watch permissions", Ordered, func() {
 
 	It("Ensures the watches restart on a Kubernetes API outage reevaluate permissions", func() {
 		By("Removing the user watch access")
+
 		err := k8sClient.RbacV1().ClusterRoleBindings().Delete(ctx, "watch-all", metav1.DeleteOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		By("Stopping the RetryWatcher under the hood to simulate an unrecoverable error")
+
 		typedDynamicWatcher, ok := dynWatcher.(*dynamicWatcher)
 		Expect(ok).To(BeTrue(), "Expected the DynamicWatcher interface to be dynamicWatcher type")
 		typedDynamicWatcher.lock.Lock()
@@ -293,6 +295,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		watcher, watched, dynamicWatcher = getDynamicWatcher(ctxTest, reconcilerObj, nil)
 
 		watchedObjIDs = []ObjectIdentifier{}
+
 		for _, watchedObj := range watched {
 			id := toObjectIdentifer(watchedObj)
 			id.Namespace = namespace // ensure namespace is set, even (possibly "incorrectly") on cluster-scoped objects
@@ -319,6 +322,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 
 	It("Ensures watches are not added when invalid input is provided", func() {
 		By("Verifying that an error is returned when no watched objects are provided")
+
 		err := dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), ObjectIdentifier{})
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
@@ -326,6 +330,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
 		By("Verifying that an error is returned when an invalid watcher object is provided")
+
 		err = dynamicWatcher.AddWatcher(ObjectIdentifier{}, watchedObjIDs[0])
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
@@ -333,6 +338,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
 		By("Verifying that an error is returned when an invalid watched object is provided")
+
 		err = dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), ObjectIdentifier{})
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
@@ -340,6 +346,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
 		By("Verifying that an error is returned when the watched object does not have a CRD installed")
+
 		obj := ObjectIdentifier{
 			Group:     "",
 			Version:   "v1",
@@ -357,6 +364,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		Eventually(dynamicWatcher.GetWatchCount, "3s").Should(Equal(uint(0)))
 
 		By("Verifying that the existing watchers are retained when the watched object does not have a CRD installed")
+
 		err = dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), toObjectIdentifer(watched[0]))
 		Expect(err).ToNot(HaveOccurred())
 		Eventually(dynamicWatcher.GetWatchCount, "3s").Should(Equal(uint(1)))
@@ -376,6 +384,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 
 	It("Adds watches", func() {
 		By("Adding the watcher with a single watched object")
+
 		err := dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), watchedObjIDs[0])
 		Expect(err).ToNot(HaveOccurred())
 
@@ -383,6 +392,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		Eventually(reconcilerObj.ResultsChan, "5s").Should(HaveLen(1))
 
 		By("Update the watcher with both watched objects")
+
 		err = dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs...)
 		Expect(err).ToNot(HaveOccurred())
 
@@ -390,6 +400,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		Eventually(reconcilerObj.ResultsChan, "5s").Should(HaveLen(2))
 
 		By("Checking that the watcher object was passed to the reconciler")
+
 		for len(reconcilerObj.ResultsChan) != 0 {
 			objectID, ok := <-reconcilerObj.ResultsChan
 			Expect(ok).To(BeTrue())
@@ -400,6 +411,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 
 	It("Ensures the reconciler is called", func() {
 		By("Updating a watched object")
+
 		watchedSecret := watched[0].(*corev1.Secret)
 		watchedSecret.Labels = map[string]string{"watch": "me"}
 		_, err := k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watchedSecret, metav1.UpdateOptions{})
@@ -424,6 +436,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 
 	It("Ensures no duplicate watches are added", func() {
 		By("Making a watched object be watched by another watcher")
+
 		err := dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watched[0]), toObjectIdentifer(watched[1]))
 		Expect(err).ToNot(HaveOccurred())
 
@@ -433,10 +446,12 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 
 	It("Removes the watcher", func() {
 		By("Verifying that an error is returned when watcher is invalid")
+
 		err := dynamicWatcher.RemoveWatcher(ObjectIdentifier{})
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
 
 		By("Removing the second watcher")
+
 		err = dynamicWatcher.RemoveWatcher(toObjectIdentifer(watched[0]))
 		Expect(err).ToNot(HaveOccurred())
 
@@ -444,6 +459,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(2)))
 
 		By("Updating the first watcher to watch only one object")
+
 		err = dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), toObjectIdentifer(watched[0]))
 		Expect(err).ToNot(HaveOccurred())
 
@@ -451,6 +467,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(1)))
 
 		By("Removing the first watcher entirely")
+
 		err = dynamicWatcher.RemoveWatcher(toObjectIdentifer(watcher))
 		Expect(err).ToNot(HaveOccurred())
 
@@ -461,6 +478,7 @@ var _ = Describe("Test the client", Ordered, Serial, func() {
 		Expect(reconcilerObj.ResultsChan).Should(BeEmpty())
 
 		By("Updating a previously watched object to ensure no reconcile is called")
+
 		watchedSecret := watched[0].(*corev1.Secret)
 		watchedSecret.Labels = map[string]string{"watch": "me-too"}
 		_, err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watchedSecret, metav1.UpdateOptions{})
@@ -491,6 +509,7 @@ var _ = Describe("Test the client with the initial reconcile is disabled", Order
 		)
 
 		watchedObjIDs = []ObjectIdentifier{}
+
 		for _, watchedObj := range watched {
 			id := toObjectIdentifer(watchedObj)
 			id.Namespace = namespace // ensure namespace is set, even (possibly "incorrectly") on cluster-scoped objects
@@ -517,6 +536,7 @@ var _ = Describe("Test the client with the initial reconcile is disabled", Order
 
 	It("Adds watches", func() {
 		By("Adding the watcher with a single watched object")
+
 		err := dynamicWatcher.AddWatcher(toObjectIdentifer(watcher), watchedObjIDs[0])
 		Expect(err).ToNot(HaveOccurred())
 
@@ -524,6 +544,7 @@ var _ = Describe("Test the client with the initial reconcile is disabled", Order
 		Consistently(reconcilerObj.ResultsChan, "5s").Should(BeEmpty())
 
 		By("Updating the watched object")
+
 		watchedSecret := watched[0].(*corev1.Secret)
 		watchedSecret.Labels = map[string]string{"trigger": "reconcile"}
 		_, err = k8sClient.CoreV1().Secrets(namespace).Update(ctxTest, watchedSecret, metav1.UpdateOptions{})
@@ -639,6 +660,7 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 		Consistently(reconcilerObj.ResultsChan, "3s").Should(BeEmpty())
 
 		By("Updating the label to make the label match the selector")
+
 		cm.Labels = map[string]string{"test-label": "foo"}
 		_, err = k8sClient.CoreV1().ConfigMaps(namespace).Update(ctx, &cm, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
@@ -648,6 +670,7 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 		Consistently(reconcilerObj.ResultsChan, "3s").Should(HaveLen(1))
 
 		By("Updating the label to make the label not match the selector")
+
 		cm.Labels = map[string]string{"test-label": "baz"}
 		_, err = k8sClient.CoreV1().ConfigMaps(namespace).Update(ctx, &cm, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
@@ -695,6 +718,7 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 
 	It("Verifies the client cleans up watches", func() {
 		watchedObjIDs := []ObjectIdentifier{}
+
 		for _, watchedObj := range watched {
 			id := toObjectIdentifer(watchedObj)
 			id.Namespace = namespace // ensure namespace is set, even (possibly "incorrectly") on cluster-scoped objects
@@ -702,6 +726,7 @@ var _ = Describe("Test the client clean up", Ordered, func() {
 		}
 
 		By("Adding the watcher with two watched objects")
+
 		err := dynamicWatcher.AddOrUpdateWatcher(toObjectIdentifer(watcher), watchedObjIDs...)
 		Expect(err).ToNot(HaveOccurred())
 
@@ -742,11 +767,13 @@ var _ = Describe("Test ObjectIdentifier", func() {
 		obj.Version = ""
 		err = obj.Validate()
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
+
 		obj.Version = "v1"
 
 		obj.Kind = ""
 		err = obj.Validate()
 		Expect(errors.Is(err, ErrInvalidInput)).To(BeTrue())
+
 		obj.Kind = "ConfigMap"
 
 		obj.Name = ""
@@ -788,10 +815,12 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 
 	It("Verifies a requeue occurs when the reconciler returns an error", func() {
 		reconcileCount := 0
+
 		ctx, cancel := context.WithCancel(context.TODO())
 		defer cancel()
 
 		By("Making the Reconcile method return an error only on the first call")
+
 		reconcileRV = func() (reconcile.Result, error) {
 			reconcileCount++
 
@@ -825,10 +854,12 @@ var _ = Describe("Test dynamicWatcher.reconcileHandler", Serial, func() {
 
 	It("Verifies a requeue occurs when the Reconcile method returns a RequeueAfter value", func() {
 		reconcileCount := 0
+
 		ctx, cancel := context.WithCancel(context.TODO())
 		defer cancel()
 
 		By("Making the Reconcile method return a RequeueAfter on the first call")
+
 		reconcileRV = func() (reconcile.Result, error) {
 			reconcileCount++
 
@@ -1202,6 +1233,7 @@ var _ = Describe("Test the client query API", Ordered, func() {
 
 		lsReq, err := labels.ParseToRequirements("watch=me")
 		Expect(err).ToNot(HaveOccurred())
+
 		ls := labels.NewSelector().Add(lsReq...)
 
 		cachedObjects, err := dynamicWatcher.List(watcher, cm.GroupVersionKind(), namespace, ls)
@@ -1231,6 +1263,7 @@ var _ = Describe("Test the client query API", Ordered, func() {
 
 		lsReq, err := labels.ParseToRequirements("watch=me")
 		Expect(err).ToNot(HaveOccurred())
+
 		ls := labels.NewSelector().Add(lsReq...)
 
 		// The cleanup from the last "It" should make this return nothing.
@@ -1257,6 +1290,7 @@ var _ = Describe("Test the client query API", Ordered, func() {
 	It("Returns the list from the cache", func() {
 		lsReq, err := labels.ParseToRequirements("watch=me")
 		Expect(err).ToNot(HaveOccurred())
+
 		ls := labels.NewSelector().Add(lsReq...)
 
 		gvk := schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}
@@ -1358,6 +1392,7 @@ var _ = Describe("Test the client query API", Ordered, func() {
 
 	It("A cluster scoped Get query with a namespace is handled correctly", func(ctx SpecContext) {
 		By("Performing a first query batch")
+
 		nsGVK := schema.GroupVersionKind{Kind: "Namespace", Version: "v1"}
 
 		err := dynamicWatcher.StartQueryBatch(watcherID)
@@ -1373,6 +1408,7 @@ var _ = Describe("Test the client query API", Ordered, func() {
 		Expect(dynamicWatcher.GetWatchCount()).To(Equal(uint(1)))
 
 		By("Performing a second duplicate query batch to ensure watches are not cleaned up")
+
 		err = dynamicWatcher.StartQueryBatch(watcherID)
 		Expect(err).ToNot(HaveOccurred())
 
@@ -1407,6 +1443,7 @@ var _ = Describe("Test the client query API", Ordered, func() {
 		Eventually(reconcilerObj.ResultsChan, "3s").Should(HaveLen(2))
 
 		By("Pulling from the cache without the namespace")
+
 		ns, err := dynamicWatcher.GetFromCache(nsGVK, "", "default")
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ns).ToNot(BeNil())

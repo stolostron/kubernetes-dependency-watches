@@ -1,4 +1,3 @@
-// Copyright Contributors to the Open Cluster Management project
 package client
 
 import (
@@ -59,6 +58,7 @@ var _ = Describe("Test the cache", Ordered, func() {
 	It("Caches a list query result", func() {
 		object1 := unstructured.Unstructured{}
 		object1.SetName("cached-object1")
+
 		object2 := unstructured.Unstructured{}
 		object2.SetName("cached-object2")
 		cache.CacheList(configMapGVK, "default", nil, []unstructured.Unstructured{object1, object2})
@@ -116,6 +116,7 @@ var _ = Describe("Test the cache", Ordered, func() {
 
 		object1 := unstructured.Unstructured{}
 		object1.SetName("cached-object1")
+
 		object2 := unstructured.Unstructured{}
 		object2.SetName("cached-object2")
 		cache.CacheObject(configMapGVK, "default", "something1", &object1)

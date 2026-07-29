@@ -15,6 +15,12 @@ import (
 // defaultBufferSize is the size of the underlying channel used when integrating with controller-runtime.
 const defaultBufferSize = 1024
 
+// ControllerRuntimeSourceReconciler is a reconciler to integrate with controller-runtime. See
+// NewControllerRuntimeSource.
+type ControllerRuntimeSourceReconciler struct {
+	eventChan chan<- event.GenericEvent
+}
+
 // NewControllerRuntimeSource returns a reconciler for DynamicWatcher that sends events to a controller-runtime
 // source.Channel. This source.Channel can be used in the controller-runtime builder.Builder.WatchesRawSource method.
 // This source.Channel will only send event.GenericEvent typed events, so any handlers specified in the
@@ -26,12 +32,6 @@ func NewControllerRuntimeSource() (*ControllerRuntimeSourceReconciler, source.So
 	return &ControllerRuntimeSourceReconciler{eventChan}, sourceChan
 }
 
-// ControllerRuntimeSourceReconciler is a reconciler to integrate with controller-runtime. See
-// NewControllerRuntimeSource.
-type ControllerRuntimeSourceReconciler struct {
-	eventChan chan<- event.GenericEvent
-}
-
 // Reconcile will convert the input ObjectIdentifier and send a controller-runtime GenericEvent on
 // ControllerRuntimeSourceReconciler's eventChan channel.
 func (t *ControllerRuntimeSourceReconciler) Reconcile(
@@ -40,10 +40,10 @@ func (t *ControllerRuntimeSourceReconciler) Reconcile(
 	reconcile.Result, error,
 ) {
 	watcherObj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": watcher.GroupVersionKind().GroupVersion().String(),
 			"kind":       watcher.Kind,
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      watcher.Name,
 				"namespace": watcher.Namespace,
 			},
